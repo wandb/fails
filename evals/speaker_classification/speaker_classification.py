@@ -84,7 +84,7 @@ def affiliation_score(output: dict, affiliation: str) -> dict:
 def main():
     os.environ["WEAVE_PARALLELISM"] = "10"
     weave.init("wandb-applied-ai-team/eval-failures")
-    dataset = load_csv_dataset("evals/datasets/speaker_classification.csv")
+    dataset = weave.ref("speaker_classification") #.get().to_pandas().to_dict(orient="records")
     # dataset = dataset[:2]
     model = SpeakerAffiliationModel()
     evaluation = weave.Evaluation(
