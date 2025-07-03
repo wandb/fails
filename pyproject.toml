@@ -6,7 +6,16 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "litellm>=1.73.1",
+    "openai-agents[litellm]>=0.0.19",
     "pydantic>=2.11.7",
     "python-dotenv>=1.1.1",
+    "simple-parsing>=0.1.7",
     "weave>=0.51.54",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["fails"]
