@@ -1,37 +1,34 @@
 import asyncio
+import logging
 import os
-import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import litellm
 import simple_parsing
+import yaml
 from agents import Agent, Runner, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
-# from console import logger  # Commented out - not used
+from simple_arrow_selector import simple_arrow_selection
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-
-load_dotenv()
-
-set_tracing_disabled(True)
-
-import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fails.weave_query import (
     TraceDepth,
-    query_evaluation_data,
     get_available_columns,
+    query_evaluation_data,
 )
 
-import logging
+load_dotenv()
+set_tracing_disabled(True)
+
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
 
@@ -44,7 +41,7 @@ class Args:
     api_key: str | None = os.getenv("GOOGLE_API_KEY")
     debug: bool = False
     force_column_selection: bool = False
-    config_file: str = os.path.expanduser("~/.wandb/failure_categorization_config.json")
+    config_file: str = os.path.expanduser("~/.wandb/failure_categorization_config.yaml")
 
 
 EVALUATION_FAILURE_DEFINITION = """An evaluation failure is defined as the output of a single row \
@@ -230,77 +227,74 @@ If a trace doesn't fit into any of the defined task failure categories, it shoul
 
 
 def interactive_column_selection(
-    console: Console,
-    columns: list[str],
-    preselected: set[str]
+    console: Console, columns: list[str], preselected: set[str]
 ) -> set[str]:
     """
     Interactive column selection using arrow keys.
-    
+
     Args:
         console: Rich console instance
         columns: List of available columns
         preselected: Set of pre-selected columns
-        
+
     Returns:
         Set of selected columns
     """
     # Add parent directory to path to find the selector module
-    import sys
-    import os
+
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
-    
-    from simple_arrow_selector import simple_arrow_selection
+
     return simple_arrow_selection(console, columns, preselected)
 
 
-
-
-def load_column_preferences(config_file: str, entity_name: str, project_name: str) -> Optional[List[str]]:
+def load_column_preferences(
+    config_file: str, entity_name: str, project_name: str
+) -> Optional[List[str]]:
     """
     Load column preferences for a specific project from config file.
-    
+
     Args:
         config_file: Path to the config file
         entity_name: Weave entity name
         project_name: Weave project name
-        
+
     Returns:
         List of column names if preferences exist, None otherwise
     """
     config_path = Path(config_file)
-    
+
     if not config_path.exists():
         return None
-    
+
     try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
         # Look for project-specific config
         project_key = f"{entity_name}/{project_name}"
-        
-        if project_key in config and "failure_categorization_columns" in config[project_key]:
+
+        if (
+            config
+            and project_key in config
+            and "failure_categorization_columns" in config[project_key]
+        ):
             return config[project_key]["failure_categorization_columns"]
-        
+
         return None
-        
-    except (json.JSONDecodeError, KeyError) as e:
+
+    except (yaml.YAMLError, KeyError) as e:
         print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
         return None
 
 
 def save_column_preferences(
-    config_file: str, 
-    entity_name: str, 
-    project_name: str, 
-    columns: List[str]
+    config_file: str, entity_name: str, project_name: str, columns: List[str]
 ) -> None:
     """
     Save column preferences for a specific project to config file.
-    
+
     Args:
         config_file: Path to the config file
         entity_name: Weave entity name
@@ -308,31 +302,33 @@ def save_column_preferences(
         columns: List of column names to save
     """
     config_path = Path(config_file)
-    
+
     # Ensure directory exists
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Load existing config or create new
     config = {}
     if config_path.exists():
         try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-        except json.JSONDecodeError:
-            print("[yellow]Warning: Existing config file is invalid, creating new one[/yellow]")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            print(
+                "[yellow]Warning: Existing config file is invalid, creating new one[/yellow]"
+            )
             config = {}
-    
+
     # Update with new preferences
     project_key = f"{entity_name}/{project_name}"
     if project_key not in config:
         config[project_key] = {}
-    
+
     config[project_key]["failure_categorization_columns"] = columns
-    
-    # Save config
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
-    
+
+    # Save config as YAML
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
     print(f"[green]✓ Saved column preferences to {config_file}[/green]")
 
 
@@ -348,42 +344,43 @@ async def run_pipeline(
     # Query Weave for evaluation data using the enhanced API
     console = Console()
 
-
     console.print("[bold cyan]🔍 Fetching evaluation trace...[/bold cyan]")
 
     # ----------------- Column Selection -----------------
-    
+
     entity_name = "wandb-applied-ai-team"
     project_name = "eval-failures"
-    
+
     # Check for saved column preferences
     saved_columns = load_column_preferences(config_file, entity_name, project_name)
-    
+
     if saved_columns and not force_column_selection:
         # Use saved preferences
         console.print("\n[bold blue]📋 Using saved column preferences[/bold blue]")
         selected_columns = set(saved_columns)
-        
+
         # Display the columns being used
-        console.print(Panel(
-            f"[green]Using {len(selected_columns)} saved columns for {entity_name}/{project_name}[/green]\n\n"
-            "[dim]To re-select columns, use --force-column-selection[/dim]",
-            title="📊 Column Configuration",
-            border_style="blue"
-        ))
-        
+        console.print(
+            Panel(
+                f"[green]Using {len(selected_columns)} saved columns for {entity_name}/{project_name}[/green]\n\n"
+                "[dim]To re-select columns, use --force-column-selection[/dim]",
+                title="📊 Column Configuration",
+                border_style="blue",
+            )
+        )
+
         # Show columns grouped
         grouped = {}
         other_cols = []
         for col in sorted(selected_columns):
-            if '.' in col:
-                prefix = col.split('.')[0]
+            if "." in col:
+                prefix = col.split(".")[0]
                 if prefix not in grouped:
                     grouped[prefix] = []
                 grouped[prefix].append(col)
             else:
                 other_cols.append(col)
-        
+
         # Display grouped columns
         for prefix in sorted(grouped.keys()):
             cols = grouped[prefix]
@@ -392,73 +389,90 @@ async def run_pipeline(
                 console.print(f"  • {col}")
             if len(cols) > 3:
                 console.print(f"  ... and {len(cols) - 3} more")
-        
+
         if other_cols:
             console.print(f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):")
             for col in other_cols:
                 console.print(f"  • {col}")
-                
+
         console.print()
-        
+
     else:
         # Perform column selection
         console.print("\n[bold blue]📋 Column Selection[/bold blue]")
-        
+
         if saved_columns and force_column_selection:
-            console.print("[yellow]Force selection enabled - overriding saved preferences[/yellow]")
+            console.print(
+                "[yellow]Force selection enabled - overriding saved preferences[/yellow]"
+            )
         elif not saved_columns:
-            console.print("[yellow]No saved preferences found for this project[/yellow]")
-            
+            console.print(
+                "[yellow]No saved preferences found for this project[/yellow]"
+            )
+
         console.print("Discovering available columns...")
-        
+
         # Get available columns (with nested paths like inputs.field1, inputs.field2, etc.)
         column_info = get_available_columns(
             eval_id=eval_id,
-            entity_name=entity_name, 
+            entity_name=entity_name,
             project_name=project_name,
             include_nested_paths=True,  # This expands objects to show their properties
             max_nesting_depth=4,  # Allow deeper nesting to see paths like inputs.self.transcript
         )
-        
+
         # Filter columns based on user requirements
         all_columns = column_info["all_columns"]
-        
+
         # Define metadata columns to exclude (not relevant for analysis)
         metadata_columns = {
-            "deleted_at", "display_name", "storage_size_bytes", "thread_id",
-            "total_storage_size_bytes", "trace_id", "turn_id", "wb_run_id", 
-            "wb_run_step", "wb_user_id", "project_id"
+            "deleted_at",
+            "display_name",
+            "storage_size_bytes",
+            "thread_id",
+            "total_storage_size_bytes",
+            "trace_id",
+            "turn_id",
+            "wb_run_id",
+            "wb_run_step",
+            "wb_user_id",
+            "project_id",
         }
-        
+
         # Define top-level columns to exclude (we'll show their nested properties instead)
-        exclude_top_level = {"inputs", "output"}  # Don't show these as standalone columns
-        
+        exclude_top_level = {
+            "inputs",
+            "output",
+        }  # Don't show these as standalone columns
+
         # Filter out irrelevant columns
         filtered_columns = [
-            col for col in all_columns
-            if not col.startswith("attributes.") 
+            col
+            for col in all_columns
+            if not col.startswith("attributes.")
             and not col.startswith("summary.")
             and col not in metadata_columns
             and col not in exclude_top_level  # Exclude top-level objects
+            and not any(part.startswith('_') for part in col.split('.'))  # Exclude underscore-prefixed keys
         ]
-        
+
         # For "other" group, only keep specific columns
         # This will be applied after grouping in the selector
         allowed_other_columns = {"id", "exception", "started_at", "ended_at"}
-        
+
         # Apply additional filtering for non-dotted columns
         final_filtered_columns = []
         for col in filtered_columns:
-            if '.' in col:
+            if "." in col:
                 # Keep all dotted columns (nested properties)
                 final_filtered_columns.append(col)
             else:
                 # For non-dotted columns, only keep allowed ones
                 if col in allowed_other_columns:
                     final_filtered_columns.append(col)
-        
+
         filtered_columns = final_filtered_columns
-        
+
         # Pre-select output.scores.* columns and exception
         preselected = set()
         for col in filtered_columns:
@@ -466,22 +480,19 @@ async def run_pipeline(
                 preselected.add(col)
             elif col == "exception":
                 preselected.add(col)
-        
+
         # Interactive column selection
         selected_columns = interactive_column_selection(
             console, filtered_columns, preselected
         )
-        
+
         console.print(f"\n[green]✅ Selected {len(selected_columns)} columns[/green]")
-        
+
         # Save preferences
         save_column_preferences(
-            config_file,
-            entity_name,
-            project_name,
-            list(selected_columns)
+            config_file, entity_name, project_name, list(selected_columns)
         )
-        
+
         if debug:
             console.print("[dim]Selected columns:[/dim]")
             for col in sorted(selected_columns):
@@ -501,7 +512,9 @@ async def run_pipeline(
     columns_for_query = list(selected_columns)
     if "display_name" not in columns_for_query:
         columns_for_query.append("display_name")
-        console.print("[dim]Note: Added 'display_name' column for better trace readability[/dim]")
+        console.print(
+            "[dim]Note: Added 'display_name' column for better trace readability[/dim]"
+        )
 
     eval_data = query_evaluation_data(
         eval_id=eval_id,
@@ -542,7 +555,7 @@ async def run_pipeline(
     )
     trace_data = []
 
-    console.print(f"\n[dim]CHILDREN:[/dim]")
+    console.print("\n[dim]CHILDREN:[/dim]")
     console.print(
         f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]"
     )
@@ -564,7 +577,11 @@ async def run_pipeline(
             trace_table.add_row("Ended At", trace.get("ended_at", "N/A"))
             trace_table.add_row("Summary", "\n" + str(trace.get("summary", "N/A")))
             trace_table.add_row("Input", "\n" + str(trace.get("inputs", {})))
-            if trace.get("output") and isinstance(trace.get("output"), dict) and "output" in trace["output"]:
+            if (
+                trace.get("output")
+                and isinstance(trace.get("output"), dict)
+                and "output" in trace["output"]
+            ):
                 trace_table.add_row("Output", "\n" + str(trace["output"]["output"]))
 
             console.print(trace_table)
@@ -578,26 +595,30 @@ async def run_pipeline(
             "output": trace.get("output", {}),
             "scores": {},
         }
-        
+
         # Safely extract nested fields
         if isinstance(trace.get("output"), dict):
             output_data = trace["output"]
-            
+
             # Extract scores if available
             if "scores" in output_data:
                 trace_entry["scores"] = output_data["scores"]
-            
+
             # Extract affiliation_score if available
             if "affiliation_score" in output_data:
                 trace_entry["output"]["affiliation"] = output_data["affiliation_score"]
-            
+
             # Extract nested output fields if available
             if "output" in output_data and isinstance(output_data["output"], dict):
                 if "reasoning" in output_data["output"]:
-                    trace_entry["output"]["reasoning"] = output_data["output"]["reasoning"]
+                    trace_entry["output"]["reasoning"] = output_data["output"][
+                        "reasoning"
+                    ]
                 if "affiliation" in output_data["output"]:
-                    trace_entry["output"]["affiliation"] = output_data["output"]["affiliation"]
-        
+                    trace_entry["output"]["affiliation"] = output_data["output"][
+                        "affiliation"
+                    ]
+
         trace_data.append(trace_entry)
 
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
@@ -671,7 +692,7 @@ async def run_pipeline(
         for trace_entry in trace_data
     ]
 
-    console.print(f"[yellow]⚡ Running categorization tasks...[/yellow]")
+    console.print("[yellow]⚡ Running categorization tasks...[/yellow]")
     draft_categorization_results = await asyncio.gather(*tasks)
     num_draft_categorizations = len(draft_categorization_results)
 
@@ -680,10 +701,10 @@ async def run_pipeline(
 
     for draft_categorization_result in draft_categorization_results:
         draft_categorization_results_str += (
-            f"### Trace ID: {draft_categorization_result.trace_id}\n"
+            f"### Trace ID: {draft_categorization_result.trace_id}\n\n"
         )
         draft_categorization_results_str += (
-            f"#### Notes\n\n{draft_categorization_result.notes}\n"
+            f"#### Notes\n\n{draft_categorization_result.notes}\n\n"
         )
         draft_categorization_results_str += f"#### Candidate Task Failure Categories\n\n{draft_categorization_result.candidate_task_failure_categories}\n"
         draft_categorization_results_str += "\n" + "=" * 50 + "\n"
@@ -766,7 +787,7 @@ async def run_pipeline(
     # Display task failure categories in a nice table
     if "task_failure_categories" in review_data:
         categories_table = Table(
-            title="Task Failure Categories",
+            title="Clustered Task Failure Categories",
             show_header=True,
             header_style="bold magenta",
         )
@@ -860,7 +881,6 @@ Does the eval failure you can see above fall into any of the proposed failure ca
         evaluation_evaluation_or_scorer_data: str,
         proposed_failure_categories: list[str],
     ) -> CategoryReview:
-
         category_review_llm = Agent(
             name="Final Classification",
             instructions=CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
@@ -870,13 +890,15 @@ Does the eval failure you can see above fall into any of the proposed failure ca
 
         category_review_prompt_str = CATEGORIZATION_REVIEW_PROMPT.format(
             user_context=user_context,
-            row_input="what is the weather in Tokyo?",
-            row_output="The weather in Tokyo is sunny.",
-            evaluation_evaluation_or_scorer_data="incorrect",
+            row_input=row_input,
+            row_output=row_output,
+            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
             proposed_failure_categories=review_data["task_failure_categories"],
         )
 
-        category_review_result = await Runner.run(category_review_llm, category_review_prompt_str)
+        category_review_result = await Runner.run(
+            category_review_llm, category_review_prompt_str
+        )
 
         return category_review_result.final_output
 
@@ -900,13 +922,13 @@ Does the eval failure you can see above fall into any of the proposed failure ca
             f"""[bold cyan]Thinking:[/bold cyan] {first_result.thinking}...
 [bold cyan]Candidate Categories Appropriate:[/bold cyan] {first_result.candidate_categories_appropriate}
 [bold cyan]New Category Proposal:[/bold cyan] {first_result.new_category_proposal}""",
-            title="Final Test Categorization",
+            title="First Test Categorization Result",
             border_style="magenta",
         )
     else:
         final_result_panel = Panel(
             "[red]No category review results available[/red]",
-            title="Final Test Categorization",
+            title="First Test Categorization Result",
             border_style="red",
         )
     console.print(final_result_panel)

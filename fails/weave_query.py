@@ -1068,6 +1068,10 @@ def get_available_columns(
                 def extract_paths(obj: Dict[str, Any], prefix: str = "", depth: int = 0, max_depth: int = 3) -> None:
                     """Recursively extract paths from nested dict."""
                     for key, value in obj.items():
+                        # Skip keys that start with underscore
+                        if key.startswith('_'):
+                            continue
+                            
                         path = f"{prefix}.{key}" if prefix else key
                         container_paths.append(path)
                         all_paths.add(f"{container}.{path}")
