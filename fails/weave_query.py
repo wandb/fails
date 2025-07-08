@@ -966,6 +966,7 @@ def get_available_columns(
     entity_name: str = "",
     project_name: str = "",
     include_nested_paths: bool = True,
+    max_nesting_depth: int = 3,
 ) -> Dict[str, Any]:
     """
     Get all available column names from a sample child trace of an evaluation.
@@ -1038,6 +1039,16 @@ def get_available_columns(
     # Extract top-level column names
     top_level_columns = sorted(sample_trace.keys())
     
+    # Check for and resolve any Weave references in the trace
+    refs_found = client._collect_refs(sample_trace)
+    if refs_found:
+        try:
+            resolved_values = client.read_refs_batch(refs_found)
+            resolved_refs = dict(zip(refs_found, resolved_values))
+            sample_trace = client.replace_refs_in_object(sample_trace, resolved_refs)
+        except Exception as e:
+            print(f"Warning: Could not resolve refs in sample trace: {e}")
+    
     result = {
         "top_level_columns": top_level_columns,
         "sample_trace": sample_trace,
@@ -1054,18 +1065,18 @@ def get_available_columns(
             if container in sample_trace and isinstance(sample_trace[container], dict):
                 container_paths = []
                 
-                def extract_paths(obj: Dict[str, Any], prefix: str = "") -> None:
+                def extract_paths(obj: Dict[str, Any], prefix: str = "", depth: int = 0, max_depth: int = 3) -> None:
                     """Recursively extract paths from nested dict."""
                     for key, value in obj.items():
                         path = f"{prefix}.{key}" if prefix else key
                         container_paths.append(path)
                         all_paths.add(f"{container}.{path}")
                         
-                        # Go one level deeper for dicts
-                        if isinstance(value, dict) and len(path.split('.')) < 3:  # Limit depth
-                            extract_paths(value, path)
+                        # Go deeper for dicts (up to max_depth levels)
+                        if isinstance(value, dict) and depth < max_depth:
+                            extract_paths(value, path, depth + 1, max_depth)
                 
-                extract_paths(sample_trace[container])
+                extract_paths(sample_trace[container], max_depth=max_nesting_depth)
                 
                 if container_paths:
                     nested_paths[container] = sorted(container_paths)

@@ -31,6 +31,8 @@ from fails.weave_query import (
     get_available_columns,
 )
 
+import logging
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
 
 
@@ -183,6 +185,7 @@ CLUSTERING_PROMPT = f"""
 Here are the draft categorizations and notes for {{num_traces}} traces:
 
 <draft_categorizations_and_notes>
+
 {{draft_categorizations_and_notes}}
 </draft_categorizations_and_notes>
 
@@ -345,12 +348,6 @@ async def run_pipeline(
     # Query Weave for evaluation data using the enhanced API
     console = Console()
 
-    if debug:
-        console.print(
-            f"[bold red]🔍 DEBUG MODE ENABLED, switching to {model}[/bold red]"
-        )
-        model = "gemini/gemini-2.5-flash"
-        console.print(Panel(user_context, title="User Context", border_style="yellow"))
 
     console.print("[bold cyan]🔍 Fetching evaluation trace...[/bold cyan]")
 
@@ -414,12 +411,13 @@ async def run_pipeline(
             
         console.print("Discovering available columns...")
         
-        # Get available columns
+        # Get available columns (with nested paths like inputs.field1, inputs.field2, etc.)
         column_info = get_available_columns(
             eval_id=eval_id,
             entity_name=entity_name, 
             project_name=project_name,
-            include_nested_paths=True,
+            include_nested_paths=True,  # This expands objects to show their properties
+            max_nesting_depth=4,  # Allow deeper nesting to see paths like inputs.self.transcript
         )
         
         # Filter columns based on user requirements
@@ -432,24 +430,41 @@ async def run_pipeline(
             "wb_run_step", "wb_user_id", "project_id"
         }
         
+        # Define top-level columns to exclude (we'll show their nested properties instead)
+        exclude_top_level = {"inputs", "output"}  # Don't show these as standalone columns
+        
         # Filter out irrelevant columns
         filtered_columns = [
             col for col in all_columns
             if not col.startswith("attributes.") 
             and not col.startswith("summary.")
             and col not in metadata_columns
+            and col not in exclude_top_level  # Exclude top-level objects
         ]
         
-        # Pre-select output.scores.* columns
+        # For "other" group, only keep specific columns
+        # This will be applied after grouping in the selector
+        allowed_other_columns = {"id", "exception", "started_at", "ended_at"}
+        
+        # Apply additional filtering for non-dotted columns
+        final_filtered_columns = []
+        for col in filtered_columns:
+            if '.' in col:
+                # Keep all dotted columns (nested properties)
+                final_filtered_columns.append(col)
+            else:
+                # For non-dotted columns, only keep allowed ones
+                if col in allowed_other_columns:
+                    final_filtered_columns.append(col)
+        
+        filtered_columns = final_filtered_columns
+        
+        # Pre-select output.scores.* columns and exception
         preselected = set()
         for col in filtered_columns:
             if col.startswith("output.scores."):
                 preselected.add(col)
-        
-        # Also include some essential columns (but only if they passed our filter)
-        essential_columns = ["id", "inputs", "output", "exception"]
-        for col in essential_columns:
-            if col in filtered_columns:
+            elif col == "exception":
                 preselected.add(col)
         
         # Interactive column selection
@@ -473,6 +488,11 @@ async def run_pipeline(
                 console.print(f"  - {col}")
 
     if debug:
+        console.print(
+            f"[bold red]🔍 DEBUG MODE ENABLED, switching to {model}[/bold red]"
+        )
+        model = "gemini/gemini-2.5-flash"
+        console.print(Panel(user_context, title="User Context", border_style="yellow"))
         first_pass_trace_limit = 3
     else:
         first_pass_trace_limit = None
@@ -660,12 +680,12 @@ async def run_pipeline(
 
     for draft_categorization_result in draft_categorization_results:
         draft_categorization_results_str += (
-            f"Trace ID: {draft_categorization_result.trace_id}\n"
+            f"### Trace ID: {draft_categorization_result.trace_id}\n"
         )
         draft_categorization_results_str += (
-            f"Notes: {draft_categorization_result.notes}\n"
+            f"#### Notes\n\n{draft_categorization_result.notes}\n"
         )
-        draft_categorization_results_str += f"Candidate Task Failure Categories:\n{draft_categorization_result.candidate_task_failure_categories}\n"
+        draft_categorization_results_str += f"#### Candidate Task Failure Categories\n\n{draft_categorization_result.candidate_task_failure_categories}\n"
         draft_categorization_results_str += "\n" + "=" * 50 + "\n"
 
     # Create a nice display for draft categorization results

@@ -98,3 +98,69 @@ finally:
 6. Flush output after writes for immediate display
 
 This approach creates a clean, flicker-free terminal UI that works across different terminal emulators.
+
+## Additional Terminal UI Best Practices
+
+### Initial Screen Clear
+When entering alternate screen buffer, always clear it before starting the main loop:
+```python
+# Enter alternate screen buffer and hide cursor
+sys.stdout.write("\033[?1049h\033[?25l")
+sys.stdout.flush()
+
+# Set terminal to raw mode
+tty.setraw(sys.stdin.fileno())
+
+# Initial clear of the alternate screen
+sys.stdout.write("\033[2J\033[H")
+sys.stdout.flush()
+```
+This prevents any initial garbage or previous content from appearing.
+
+### Terminal Height Considerations
+Be aware that users may have terminals of different heights. Design your UI to work well even in shorter terminals:
+- Use scrolling windows for long lists
+- Show indicators when content extends beyond view
+- Consider a reasonable default window size (e.g., 20 items)
+
+### Visual Design Principles
+1. **Use Unicode symbols sparingly but effectively**
+   - `✓` for selected items is universally understood
+   - Play button symbols (▶/▷) work well for cursors
+   - Avoid overwhelming users with too many symbols
+
+2. **Color with purpose**
+   - Use brand colors when possible (map to nearest ANSI equivalents)
+   - Selected items should stand out (bright colors)
+   - Unselected items should recede (gray/dim colors)
+   - Groups/headers benefit from bold text without color
+
+3. **Clear visual hierarchy**
+   - Headers separated by divider lines
+   - Empty lines between groups for breathing room
+   - Consistent indentation for sub-items
+
+### Common ANSI Color Codes
+- `\033[90m` - Dark gray (good for unselected)
+- `\033[37m` - Light gray (better readability)
+- `\033[96m` - Bright cyan (good for highlights)
+- `\033[1m` - Bold text (good for headers)
+- `\033[0m` - Reset all formatting
+
+### Handling Long Content
+When header text gets long (like navigation instructions), consider:
+- Using right-aligned status indicators
+- Breaking instructions into multiple lines
+- Using separators to create clear zones
+- Adjusting separator line lengths to match content
+
+Example layout:
+```
+==========================================================================================
+Column Selection                                                    Selected: 4/21
+------------------------------------------------------------------------------------------
+↑/↓ Navigate  |  Space Select  |  a All  |  n None  |  q Save
+──────────────────────────────────────────────────────────────────────────────────────────
+```
+
+This creates distinct zones for title, status, instructions, and content.
