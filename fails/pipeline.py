@@ -11,7 +11,7 @@ import simple_parsing
 import yaml
 from agents import Agent, Runner, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
-from simple_arrow_selector import simple_arrow_selection
+from cli.arrow_selector import simple_arrow_selection
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -512,9 +512,6 @@ async def run_pipeline(
     columns_for_query = list(selected_columns)
     if "display_name" not in columns_for_query:
         columns_for_query.append("display_name")
-        console.print(
-            "[dim]Note: Added 'display_name' column for better trace readability[/dim]"
-        )
 
     eval_data = query_evaluation_data(
         eval_id=eval_id,
