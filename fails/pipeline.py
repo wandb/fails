@@ -31,7 +31,6 @@ class Args:
 
     user_context: str = "my eval is about finding the weather in Tokyo"
     model: str = "gemini/gemini-2.5-pro"
-    api_key: str | None = os.getenv("GOOGLE_API_KEY")
     debug: bool = False
 
 
@@ -267,7 +266,7 @@ async def main():
                 row_output=row_output,
                 evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
             ),
-            model=LitellmModel(model=args.model, api_key=args.api_key),
+            model=LitellmModel(model=args.model, api_key=os.getenv("GOOGLE_API_KEY")),
             output_type=FirstPassCategorization,
         )
 
@@ -313,7 +312,7 @@ async def main():
             num_traces=num_draft_categorizations,
             draft_categorizations_and_notes=draft_categorization_results_str,
         ),
-        model=LitellmModel(model=args.model, api_key=args.api_key),
+        model=LitellmModel(model=args.model, api_key=os.getenv("GOOGLE_API_KEY")),
         output_type=ClusteringCategories,
     )
 
@@ -332,7 +331,7 @@ async def main():
             row_output="The weather in Tokyo is sunny.",
             evaluation_evaluation_or_scorer_data="incorrect",
         ),
-        model=LitellmModel(model=args.model, api_key=args.api_key),
+        model=LitellmModel(model=args.model, api_key=os.getenv("GOOGLE_API_KEY")),
         output_type=FirstPassCategorization,
     )
 

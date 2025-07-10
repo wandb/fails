@@ -1,0 +1,20 @@
+# Core evaluation dependencies
+weave>=0.50.0
+agents>=0.5.0
+litellm>=1.40.0
+simple-parsing>=0.1.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0,<3.0.0
+
+# ML dependencies for sophisticated scorers - exact versions that work together
+scikit-learn==1.5.2
+sentence-transformers==2.7.0
+numpy==1.26.4
+torch==2.4.1
+transformers==4.44.2
+tensorflow==2.17.0
+
+# Supporting dependencies
+huggingface-hub==0.24.6
+tokenizers==0.19.1
+safetensors==0.4.4 
