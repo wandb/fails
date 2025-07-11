@@ -147,6 +147,7 @@ class WeaveQueryClient:
         evaluation_call_id: str,
         columns: Optional[List[str]] = None,
         limit: int = 1000,
+        filter_dict: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Query all child calls of an evaluation.
@@ -158,6 +159,7 @@ class WeaveQueryClient:
             evaluation_call_id: The evaluation call ID
             columns: Columns to retrieve
             limit: Maximum number of results
+            filter_dict: Optional filter dictionary (e.g., {"column_name": value})
 
         Returns:
             List of child trace dictionaries
@@ -177,14 +179,39 @@ class WeaveQueryClient:
                 "exception",
             ]
 
+        # Build the filter
+        base_filter = {
+            "parent_ids": [evaluation_call_id]  # Use direct filter instead of query expression
+        }
+        
+        # If additional filters are provided, we need to combine them
+        if filter_dict:
+            # Create a combined filter using AND operation
+            filters = [
+                {"op": "InOperation", "field": "parent_id", "value": [evaluation_call_id]}
+            ]
+            
+            # Add custom filters
+            for field, value in filter_dict.items():
+                filters.append({
+                    "op": "EqOperation",
+                    "field": field,
+                    "value": value
+                })
+            
+            # Combine with AND
+            query_filter = {
+                "op": "AndOperation",
+                "filters": filters
+            }
+        else:
+            # Use simple parent_ids filter
+            query_filter = base_filter
+
         # Query for calls where parent_id matches the evaluation
         query = {
             "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
-            "filter": {
-                "parent_ids": [
-                    evaluation_call_id
-                ]  # Use direct filter instead of query expression
-            },
+            "filter": query_filter if filter_dict else base_filter,
             "columns": columns,
             "limit": limit,
             "sort_by": [{"field": "started_at", "direction": "asc"}],
@@ -199,6 +226,7 @@ class WeaveQueryClient:
         limit_per_level: int = 1000,
         max_depth: Optional[int] = None,
         current_depth: int = 0,
+        filter_dict: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Recursively query all descendants of a trace.
@@ -209,6 +237,7 @@ class WeaveQueryClient:
             limit_per_level: Maximum results per level
             max_depth: Maximum depth to traverse (None for unlimited)
             current_depth: Current recursion depth
+            filter_dict: Optional filter dictionary (e.g., {"column_name": value})
 
         Returns:
             Dictionary with 'traces' list and 'tree' structure
@@ -218,7 +247,10 @@ class WeaveQueryClient:
 
         # Get direct children
         children = self.query_evaluation_children(
-            evaluation_call_id=parent_id, columns=columns, limit=limit_per_level
+            evaluation_call_id=parent_id, 
+            columns=columns, 
+            limit=limit_per_level,
+            filter_dict=filter_dict
         )
 
         all_traces = []
@@ -235,6 +267,7 @@ class WeaveQueryClient:
                 limit_per_level=limit_per_level,
                 max_depth=max_depth,
                 current_depth=current_depth + 1,
+                filter_dict=filter_dict,
             )
 
             all_traces.extend(descendants["traces"])
@@ -555,6 +588,7 @@ def query_evaluation_trace_data(
     trace_depth: Union[TraceDepth, bool, None] = TraceDepth.DIRECT_CHILDREN,
     include_hierarchy: bool = True,
     limit: int | None = 1000,
+    filter_dict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Query Weave evaluation data by evaluation ID.
@@ -565,6 +599,7 @@ def query_evaluation_trace_data(
             - bool: False maps to EVALUATION_ONLY, True maps to DIRECT_CHILDREN
             - None: defaults to DIRECT_CHILDREN
         include_children: DEPRECATED - use trace_depth instead
+        filter_dict: Optional filter dictionary for filtering child traces (e.g., {"output.scores.correct": False})
     """
 
     # Handle flexible trace_depth input
@@ -703,6 +738,8 @@ def query_evaluation_trace_data(
             }
             if limit is not None:
                 child_query_kwargs["limit"] = limit
+            if filter_dict is not None:
+                child_query_kwargs["filter_dict"] = filter_dict
 
             child_traces = client.query_evaluation_children(**child_query_kwargs)
 
@@ -727,6 +764,8 @@ def query_evaluation_trace_data(
             descendants_kwargs = {"parent_id": eval_trace["id"], "columns": columns}
             if limit is not None:
                 descendants_kwargs["limit_per_level"] = limit
+            if filter_dict is not None:
+                descendants_kwargs["filter_dict"] = filter_dict
 
             descendants_data = client.query_descendants_recursive(**descendants_kwargs)
 
@@ -801,6 +840,7 @@ def query_evaluation_data(
     resolve_refs: bool = True,
     replace_refs: bool = True,
     deep_ref_extraction: bool = False,
+    filter_dict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Query Weave evaluation data with optional reference resolution.
@@ -814,6 +854,7 @@ def query_evaluation_data(
         replace_refs: If True, replace refs in traces with their resolved values
         deep_ref_extraction: If True, extract all nested refs. If False,
                            only extract top-level refs with clean paths.
+        filter_dict: Optional filter dictionary for filtering child traces (e.g., {"output.scores.correct": False})
     
     Returns:
         Same as query_evaluation_data, plus:
@@ -860,6 +901,7 @@ def query_evaluation_data(
         trace_depth=trace_depth,
         include_hierarchy=include_hierarchy,
         limit=limit,
+        filter_dict=filter_dict,
     )
     
     # Extract refs from all traces

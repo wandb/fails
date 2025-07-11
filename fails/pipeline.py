@@ -4,29 +4,48 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
-
+from typing import List, Optional, Dict, Any, Tuple
+import json
 import litellm
 import simple_parsing
+import weave
 import yaml
 from agents import Agent, Runner, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
-from cli.arrow_selector import simple_arrow_selection
+from fails.cli.arrow_selector import simple_arrow_selection
+from fails.cli.failure_selector import interactive_failure_column_selection
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-import weave
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fails import weave_query
+from fails.prompts import (
+    CATEGORIZATION_REVIEW_PROMPT,
+    CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
+    CLUSTERING_PROMPT,
+    CLUSTERING_SYSTEM_PROMPT,
+    FINAL_CLASSIFICATION_PROMPT,
+    FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+    FIRST_PASS_CATEGORIZATION_PROMPT,
+    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
+    Category,
+    CategoryReview,
+    ClusteringCategories,
+    FinalClassification,
+    FinalClassificationResult,
+    FirstPassCategorization,
+    FirstPassCategorizationResult,
+)
 from fails.weave_query import (
     TraceDepth,
     get_available_columns,
     query_evaluation_data,
 )
+from fails.utis import filter_trace_data_by_columns
 
 load_dotenv()
 set_tracing_disabled(True)
@@ -34,7 +53,12 @@ set_tracing_disabled(True)
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
 
-os.environ["LLM_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+api_key = os.getenv("GOOGLE_API_KEY")
+if api_key:
+    os.environ["LLM_API_KEY"] = api_key
+else:
+    raise ValueError("GOOGLE_API_KEY environment variable not set")
+
 
 @dataclass
 class Args:
@@ -48,266 +72,6 @@ class Args:
     wandb_project: str = "eval-failures"
     wandb_logging_entity: str = "wandb-applied-ai-team"
     wandb_logging_project: str = "eval-failures-testing"
-
-
-EVALUATION_FAILURE_DEFINITION = """An evaluation failure is defined as the output of a single row \
-that failed the evaluator or scorer criteria. An individual row that failed can evaluation might do so for a \
-number of reasons such as:
-
-- The output was judged to be incorrect by the evaluator or scorer
-- The output was not formatted correctly.
-- The output had a code execution error.
-- etc.
-"""
-
-FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT = f"""
-# Task - Evaluation Failure Categorization
-
-Your task is to output a draft set of notes and candiate task failure categories given evaluation failures \
-data from a users AI system. We are trying to help a user understand the nature of the failures in their AI system \
-and identify the root causes of the failures.
-
-## Evaluation Failure Definition
-
-{EVALUATION_FAILURE_DEFINITION}
-
-### How your notes and candidate task failure categories will be used
-
-With this rough draft of failure categories and notes for 1 or a small number of rows, a later step in this pipeline \
-will subsequently compare the draft notes and candidate task failure categories across a larger number of rows. \
-From here, we will iteratively align and refine the notes and candidate task failure categories until we \
-have a set of notes and candidate task failure categories that are consistent across a larger number of rows.
-
-## Inspiration - Open Coding
-
-This task is similar to open coding, where we are trying to identify the underlying issue and phenomenon:
-
-> Open coding attempts to codify, name or classifying the observed phenomenon and is achieved by segmenting \
-data into meaningful expressions and describing that data with a single word or short sequence of words
-
-Some examples of open coding questions to consider when drafting the notes and candidate task failure categories:
-
-- Identify the underlying issue and phenomenon *(What?*)
-- Identify the phenomenon's attributes *(What kind?*)
-- Determine the time, course and location of the failure *(When? How long? Where?)*
-- Identify the intensity of the failure (*How much? How long?*)
-- Identify the reasons attached to the failure (*Why?*)
-- Identify intention or purpose of the failure (*Why?)*
-
-Take inspiration from the above open coding questions but there is no need to be exhaustive if its not relevant \
-to the failure data in question.
-"""
-
-FIRST_PASS_CATEGORIZATION_PROMPT = """
-Given the specific task context from the user as well as the evaluation failure data, please make your best \
-guess at the notes and candidate task failure categories for the given row input and row output.
-
-## User context about their AI system
-
-Below is the context from the user about their AI system and what they are trying to evaluate. This might add \
-context to the evaluation failure data below and help you better understand what the user is trying to achieve with \
-their AI system.
-
-<user_context>
-{user_context}
-</user_context>
-
-## Evaluation Failure Data
-
-### Inputs that were given to the system
-<row_input>
-{{row_input}}
-</row_input>
-
-### Outputs that were evaluated to be failures
-<row_output>
-{{row_output}}
-</row_output>
-
-### Evaluation or Scorer data and metadata
-
-<evaluation_evaluation_or_scorer_data>
-{{evaluation_evaluation_or_scorer_data}}
-</evaluation_evaluation_or_scorer_data>
-
-## Analyse
-
-With the above user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output. 
-
-### User-provided eval reasoning
-
-Be cautious if the users eval data has provided a 'thinking', 'reasoning' or 'notion' section that has come form a LLM. \
-These 'reasons' for the eval decision should not be treated as absolute truth as the LLM can still possibly be hallucinating \
-or making up reasons for the eval decision. You can still use this data, just be cautious.
-
-"""
-
-class FirstPassCategory(BaseModel):
-    """A first pass categorization of a single evaluation failure."""
-
-    category_name: str = Field(description="The name of the category.")
-    category_description: str = Field(description="A high-level, generic, short description and justification for the category.")
-    eval_failure_note: str = Field(description="A sentence or two of notes sepcific to what was observed in this individual evaluation failure.")
-
-class FirstPassCategorization(BaseModel):
-    """First pass classification of a single evaluation failure."""
-
-    thinking: str = Field(
-        description="A detailed thinking process of the classification."
-    )
-    first_pass_categories: list[FirstPassCategory] = Field(
-        description="A short list of 1-3 first pass categories for the evaluation failure."
-    )
-
-
-class FirstPassCategorizationResult(FirstPassCategorization):
-    """First pass classification of a single evaluation failure."""
-
-    trace_id: str = Field(description="The ID of the trace that was classified.")
-
-
-# ----------------- Clustering draft categorizations -----------------
-
-MAX_N_TASK_FAILURE_CATEGORIES = 7
-
-CLUSTERING_SYSTEM_PROMPT = f"""# Task - Clustering Draft Categorizations
-
-Given {{num_traces}} of draft categorizations and notes for a set of evaluation failures, cluster \
-the categorizations and notes into a defined set of task failure categories.
-
-## Definition - Evaluation Failure
-
-{EVALUATION_FAILURE_DEFINITION}
-
-## Task Context - Clustering Draft Categorizations
-
-The purpose of this task is examine draft categorizations and notes for a set of evaluation failures and cluster the \
-categories into a canonical set of task failure categories. The aim is to find a set of task failure categories that \
-are consistent across a large number of evaluation failures, ideally we have no more than \
-{MAX_N_TASK_FAILURE_CATEGORIES} eval failure categories.
-
-If a trace doesn't fit into any of the defined task failure categories, it should be classified as "other".
-
-Keep all category names lowercase, concise and separated by '_'.
-"""
-
-CLUSTERING_PROMPT = f"""
-## Draft Categorizations and Notes
-
-Here are the draft categorizations and notes for {{num_traces}} traces:
-
-<draft_categorizations_and_notes>
-
-{{draft_categorizations_and_notes}}
-</draft_categorizations_and_notes>
-
-## Output
-
-Output a list of maximum {MAX_N_TASK_FAILURE_CATEGORIES} task failure categories - you can output less than \
-{MAX_N_TASK_FAILURE_CATEGORIES} if you think that's appropriate.
-"""
-
-## ----------------- Step 3 - Category Review -----------------
-
-class Category(BaseModel):
-    """A task failure category."""
-
-    thinking: str = Field(
-        description="A detailed reasoning process behind the selection of the category \
-name, description and notes."
-    )
-    category_name: str = Field(
-        description="""The name of the task failure category. Keep all category \
-names lowercase, concise and separated by '_'. If a trace doesn't fit into any of the defined task failure \
-categories, it should be classified as 'other'."""
-    )
-    category_description: str = Field(
-        description="A short description of the task failure category."
-    )
-    category_notes: str = Field(
-        description="A sentence or two of notes for the task failure category."
-    )
-
-
-class ClusteringCategories(BaseModel):
-    """Clustering of draft categorizations and notes into a set of task failure categories."""
-
-    category_long_list_thinking: str = Field(
-        description="A detailed reasoning process and final decision making \
-for the selection of the task failure categories."
-    )
-    task_failure_categories: list[Category] = Field(
-        description="""A list of task failure categories. \
-If a trace doesn't fit into any of the defined task failure categories, it should be classified as "other"."""
-    )
-
-
-CATEGORIZATION_REVIEW_SYSTEM_PROMPT = """
-You are a helpful assistant that categorizes task failure categories.
-
-Given a proposed list of evaluation failure categories and the eval failtures themselves, determine \
-if the proposed categories are appropriate.
-
-If the proposed categories are appropriate, return the proposed categories.
-
-If the proposed categories are not appropriate, return a new list of categories that are appropriate \
-as well as a note explaining why the proposed categories are not appropriate.
-"""
-
-CATEGORIZATION_REVIEW_PROMPT = """
-Given the following user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output.
-
-## User Context
-
-<user_context>
-{user_context}
-</user_context>
-
-## Evaluation Failure Data
-
-### Inputs that were given to the system
-<row_input>
-{{row_input}}
-</row_input>
-
-### Outputs that were evaluated to be failures
-<row_output>
-{{row_output}}
-</row_output>
-
-### Evaluation or Scorer data and metadata
-
-<evaluation_evaluation_or_scorer_data>
-{{evaluation_evaluation_or_scorer_data}}
-</evaluation_evaluation_or_scorer_data>
-
-## Proposed list of available failure categories
-
-
-<proposed_failure_categories>
-{{proposed_failure_categories}}
-</proposed_failure_categories>
-
-Does the eval failure you can see above fall into any of the proposed failure categories?
-"""
-class CategoryReview(BaseModel):
-    """A task failure category."""
-
-    thinking: str = Field(
-        description="A detailed reasoning process behind the selection of the category \
-name, description and notes."
-    )
-    candidate_categories_appropriate: bool = Field(
-        description="Whether the proposed failure categories are appropriate for the eval failure."
-    )
-    new_category_proposal: Category | None = Field(
-        description="If the proposed failure categories are not appropriate, return a new \
-category that is appropriate for this particular eval failure."
-    )
-
-# -----------------------------------------------------
 
 
 @weave.op
@@ -417,40 +181,191 @@ def save_column_preferences(
     print(f"[green]✓ Saved column preferences to {config_file}[/green]")
 
 @weave.op
-async def run_pipeline(
-    eval_id: str,
-    user_context: str,
-    debug: bool,
-    model: str,
+def load_failure_column_preferences(
+    config_file: str, wandb_entity: str, wandb_project: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Load failure column preferences for a specific project from config file.
+
+    Args:
+        config_file: Path to the config file
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+
+    Returns:
+        Dict with 'failure_column' and 'failure_value' if preferences exist, None otherwise
+    """
+    config_path = Path(config_file)
+
+    if not config_path.exists():
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        # Look for project-specific config
+        project_key = f"{wandb_entity}/{wandb_project}"
+
+        if (
+            config
+            and project_key in config
+            and "failure_column" in config[project_key]
+            and "failure_value" in config[project_key]
+        ):
+            return {
+                "failure_column": config[project_key]["failure_column"],
+                "failure_value": config[project_key]["failure_value"]
+            }
+
+        return None
+
+    except (yaml.YAMLError, KeyError) as e:
+        print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
+        return None
+
+@weave.op
+def save_failure_column_preferences(
+    config_file: str, 
+    wandb_entity: str, 
+    wandb_project: str, 
+    failure_column: str,
+    failure_value: bool
+) -> None:
+    """
+    Save failure column preferences for a specific project to config file.
+
+    Args:
+        config_file: Path to the config file
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+        failure_column: The column name to filter by
+        failure_value: The boolean value to filter for
+    """
+    config_path = Path(config_file)
+
+    # Ensure directory exists
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing config or create new
+    config = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            print(
+                "[yellow]Warning: Existing config file is invalid, creating new one[/yellow]"
+            )
+            config = {}
+
+    # Update with new preferences
+    project_key = f"{wandb_entity}/{wandb_project}"
+    if project_key not in config:
+        config[project_key] = {}
+
+    config[project_key]["failure_column"] = failure_column
+    config[project_key]["failure_value"] = failure_value
+
+    # Save config as YAML
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    print(f"[green]✓ Saved failure column preferences to {config_file}[/green]")
+
+@weave.op
+def get_column_preferences(
     config_file: str,
     wandb_entity: str,
     wandb_project: str,
+    eval_id: str,
+    console: Console,
     force_column_selection: bool = False,
-):
-    # Query Weave for evaluation data using the enhanced API
-    console = Console()
+    debug: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Optional[List[str]]]:
+    """
+    Get failure column and regular column preferences for a specific project.
 
-    console.print("[bold cyan]🔍 Fetching evaluation trace...[/bold cyan]")
+    Args:
+        config_file: Path to the config file
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+        eval_id: Evaluation ID
+        console: Rich console instance
+        force_column_selection: Force re-selection of columns
+        debug: Debug mode
 
-    # ----------------- Column Selection -----------------
-
-    # Check for saved column preferences
+    Returns:
+        Tuple of (failure_config, columns_list) where:
+        - failure_config: Dict with 'failure_column' and 'failure_value' or None
+        - columns_list: List of column names for data extraction
+    """
+    # First, handle failure column selection
+    console.print("\n[bold blue]🔍 Failure Column Configuration[/bold blue]")
+    
+    # Get all available columns first
+    console.print("Discovering available columns...")
+    column_info = get_available_columns(
+        eval_id=eval_id,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        include_nested_paths=True,
+        max_nesting_depth=4,
+    )
+    all_columns = column_info["all_columns"]
+    
+    # Check for saved failure column preferences
+    saved_failure_config = load_failure_column_preferences(config_file, wandb_entity, wandb_project)
+    failure_config = None
+    
+    if saved_failure_config and not force_column_selection:
+        # Use saved failure column preferences
+        console.print(
+            Panel(
+                f"[green]Using saved failure column configuration[/green]\n\n"
+                f"Column: [cyan]{saved_failure_config['failure_column']}[/cyan]\n"
+                f"Filter for: [{'red' if not saved_failure_config['failure_value'] else 'green'}]"
+                f"{saved_failure_config['failure_value']}[/{'red' if not saved_failure_config['failure_value'] else 'green'}] values\n\n"
+                "[dim]To re-select, re-run with --force-column-selection[/dim]",
+                title="🚨 Failure Filter Configuration",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        failure_config = saved_failure_config
+    else:
+        # Perform failure column selection
+        if saved_failure_config and force_column_selection:
+            console.print("[yellow]Force selection enabled - overriding saved failure column[/yellow]")
+        else:
+            console.print("[yellow]No saved failure column preferences found[/yellow]")
+        
+        # Interactive failure column selection
+        failure_column, failure_value = interactive_failure_column_selection(console, all_columns)
+        
+        if failure_column and failure_value is not None:
+            # Validate that the selected column exists and is boolean
+            # We'll check this when we query the data
+            failure_config = {
+                "failure_column": failure_column,
+                "failure_value": failure_value
+            }
+            
+            # Save the failure column preferences
+            save_failure_column_preferences(
+                config_file, wandb_entity, wandb_project, 
+                failure_column, failure_value
+            )
+        else:
+            console.print("[yellow]No failure column selected - will process all traces[/yellow]")
+    
+    # Now handle regular column selection
     saved_columns = load_column_preferences(config_file, wandb_entity, wandb_project)
 
     if saved_columns and not force_column_selection:
         # Use saved preferences
         console.print("\n[bold blue]📋 Using saved column preferences[/bold blue]")
         selected_columns = set(saved_columns)
-
-        # Display the columns being used
-        console.print(
-            Panel(
-                f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
-                "[dim]To re-select columns, re-run the script with --force-column-selection[/dim]",
-                title="📊 Column Configuration",
-                border_style="blue",
-            )
-        )
 
         # Show columns grouped
         grouped = {}
@@ -464,21 +379,33 @@ async def run_pipeline(
             else:
                 other_cols.append(col)
 
-        # Display grouped columns
+        # Build the column display content
+        column_content = f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
+        column_content += "[dim]To re-select columns, re-run the script with --force-column-selection[/dim]\n"
+        
+        # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
             cols = grouped[prefix]
-            console.print(f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):")
+            column_content += f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):\n"
             for col in cols[:3]:
-                console.print(f"  • {col}")
+                column_content += f"  • {col}\n"
             if len(cols) > 3:
-                console.print(f"  ... and {len(cols) - 3} more")
+                column_content += f"  ... and {len(cols) - 3} more\n"
 
         if other_cols:
-            console.print(f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):")
+            column_content += f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
             for col in other_cols:
-                console.print(f"  • {col}")
+                column_content += f"  • {col}\n"
 
-        console.print()
+        # Display everything in one panel
+        console.print(
+            Panel(
+                column_content.rstrip(),
+                title="📊 Column Configuration",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
 
     else:
         # Perform column selection
@@ -493,20 +420,9 @@ async def run_pipeline(
                 "[yellow]No saved preferences found for this project[/yellow]"
             )
 
-        console.print("Discovering available columns...")
-
-        # Get available columns (with nested paths like inputs.field1, inputs.field2, etc.)
-        column_info = get_available_columns(
-            eval_id=eval_id,
-            wandb_entity=wandb_entity,
-            wandb_project=wandb_project,
-            include_nested_paths=True,  # This expands objects to show their properties
-            max_nesting_depth=4,  # Allow deeper nesting to see paths like inputs.self.transcript
-        )
+        console.print("Using discovered columns for selection...")
 
         # Filter columns based on user requirements
-        all_columns = column_info["all_columns"]
-
         # Define metadata columns to exclude (not relevant for analysis)
         metadata_columns = {
             "deleted_at",
@@ -581,20 +497,64 @@ async def run_pipeline(
             for col in sorted(selected_columns):
                 console.print(f"  - {col}")
 
+    # Always include display_name for better user experience
+    columns_for_query = list(selected_columns)
+    if "display_name" not in columns_for_query:
+        columns_for_query.append("display_name")
+    
+    # Always include the failure column if one was selected
+    if failure_config and failure_config["failure_column"] not in columns_for_query:
+        columns_for_query.append(failure_config["failure_column"])
+        
+    return failure_config, columns_for_query
+
+@weave.op
+async def run_pipeline(
+    eval_id: str,
+    user_context: str,
+    debug: bool,
+    model: str,
+    config_file: str,
+    wandb_entity: str,
+    wandb_project: str,
+    force_column_selection: bool = False,
+):
+    # Query Weave for evaluation data using the enhanced API
+    console = Console()
+
+    console.print("[bold cyan]🔍 Fetching evaluation trace...[/bold cyan]")
+
     if debug:
         console.print(
             f"[bold red]🔍 DEBUG MODE ENABLED, switching to {model}[/bold red]"
         )
         model = "gemini/gemini-2.5-flash"
-        console.print(Panel(user_context, title="User Context", border_style="yellow"))
-        first_pass_trace_limit = 3
+        N_FIRST_PASS_TRACES = 3
     else:
-        first_pass_trace_limit = None
+        N_FIRST_PASS_TRACES = None
+    
+    # Display user context in a nice yellow box
+    console.print(
+        Panel(
+            user_context,
+            title="📝 User Context",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
 
-    # Always include display_name for better user experience
-    columns_for_query = list(selected_columns)
-    if "display_name" not in columns_for_query:
-        columns_for_query.append("display_name")
+    # ----------------- Column Selection -----------------
+
+    # Check for saved column preferences
+    failure_config, columns_for_query = get_column_preferences(
+        config_file=config_file,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        eval_id=eval_id,
+        debug=debug,
+        force_column_selection=force_column_selection,
+        console=console,
+    )
 
     eval_data = query_evaluation_data(
         eval_id=eval_id,
@@ -605,8 +565,16 @@ async def run_pipeline(
         deep_ref_extraction=False,
         trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
         include_hierarchy=True,
-        limit=first_pass_trace_limit,
+        limit=N_FIRST_PASS_TRACES,
+        filter_dict={failure_config["failure_column"]: failure_config["failure_value"]} if failure_config else None,
     )
+    
+    # Filter the child traces to only include selected columns
+    if "children" in eval_data and eval_data["children"]:
+        eval_data["children"] = filter_trace_data_by_columns(
+            eval_data["children"], 
+            columns_for_query
+        )
 
     op_name = eval_data["evaluation"].get("op_name", "Unknown")
     # Truncate long op names
@@ -619,7 +587,34 @@ async def run_pipeline(
 [bold green]Total traces:[/bold green] {eval_data["trace_count"]["total"]}
 [bold green]Direct children:[/bold green] {eval_data["trace_count"].get("direct_children", 0)}"""
 
+    # If we have a failure filter, add info about filtered results
+    if failure_config:
+        eval_info += f"\n[bold green]Failure filter:[/bold green] {failure_config['failure_column']} == {failure_config['failure_value']}"
+        eval_info += f"\n[bold green]Filtered children:[/bold green] {len(eval_data.get('children', []))}"
+
     console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="green"))
+
+    # Validate failure column if one was selected
+    if failure_config and eval_data.get("children"):
+        # Check the first child trace to validate the failure column
+        first_child = eval_data["children"][0]
+        
+        # Navigate to the nested field
+        value = first_child
+        try:
+            for part in failure_config["failure_column"].split("."):
+                value = value.get(part, None)
+                if value is None:
+                    break
+            
+            if value is None:
+                console.print(f"[red]Warning: Failure column '{failure_config['failure_column']}' not found in traces![/red]")
+            elif not isinstance(value, bool):
+                console.print(f"[red]Error: Failure column '{failure_config['failure_column']}' is not a boolean! Value: {value} (type: {type(value).__name__})[/red]")
+                raise ValueError(f"Selected failure column '{failure_config['failure_column']}' is not a boolean column")
+        except (AttributeError, TypeError) as e:
+            console.print(f"[red]Error accessing failure column: {e}[/red]")
+            raise ValueError(f"Error accessing failure column '{failure_config['failure_column']}': {e}")
 
     # Show evaluation summary if available
     if "summary" in eval_data["evaluation"]:
@@ -640,37 +635,13 @@ async def run_pipeline(
         f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]"
     )
     for i, trace in enumerate(eval_data["children"][:3]):
-
-        # Extract data based on available columns
+        # Since we've already filtered the data, we can use it directly
         trace_entry = {
             "id": trace.get("id"),
             "inputs": trace.get("inputs", {}),
             "output": trace.get("output", {}),
-            "scores": {},
+            "scores": trace.get("output", {}).get("scores", {}) if trace.get("output") else {},
         }
-
-        # Safely extract nested fields
-        if isinstance(trace.get("output"), dict):
-            output_data = trace["output"]
-
-            # Extract scores if available
-            if "scores" in output_data:
-                trace_entry["scores"] = output_data["scores"]
-
-            # Extract affiliation_score if available
-            if "affiliation_score" in output_data:
-                trace_entry["output"]["affiliation"] = output_data["affiliation_score"]
-
-            # Extract nested output fields if available
-            if "output" in output_data and isinstance(output_data["output"], dict):
-                if "reasoning" in output_data["output"]:
-                    trace_entry["output"]["reasoning"] = output_data["output"][
-                        "reasoning"
-                    ]
-                if "affiliation" in output_data["output"]:
-                    trace_entry["output"]["affiliation"] = output_data["output"][
-                        "affiliation"
-                    ]
 
         trace_data.append(trace_entry)
 
@@ -690,7 +661,7 @@ async def run_pipeline(
             trace_table.add_row("Started At", trace_entry.get("started_at", "N/A"))
             trace_table.add_row("Ended At", trace_entry.get("ended_at", "N/A"))
             trace_table.add_row("Summary", "\n" + str(trace_entry.get("summary", "N/A")))
-            trace_table.add_row("Input", "\n" + str(trace_entry.get("inputs", {})))
+            # trace_table.add_row("Input", "\n" + str(trace_entry.get("inputs", {})))
             
             if (
                 trace_entry.get("output")
@@ -708,12 +679,58 @@ async def run_pipeline(
 
     console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
     
+    def construct_first_pass_categorization_prompt(
+        row_input: dict | str,
+        row_output: dict | str,
+        evaluation_evaluation_or_scorer_data: dict | str,
+        user_context: str,
+    ) -> str:
+        # Convert to JSON strings if needed
+        if isinstance(row_input, dict):
+            row_input = json.dumps(row_input, indent=2)
+        if isinstance(row_output, dict):
+            row_output = json.dumps(row_output, indent=2)
+        if isinstance(evaluation_evaluation_or_scorer_data, dict):
+            evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
+            
+        first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
+            user_context=user_context,
+            row_input=row_input,
+            row_output=row_output,
+            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        )
+        return first_pass_categorization_prompt_str
+
+    if debug:
+        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
+            row_input=trace_data[0]["inputs"],
+            row_output=trace_data[0]["output"],
+            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+            user_context=user_context,
+        )
+        console.print(
+            Panel(
+                FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
+                title="🤖 First Pass Categorization System Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print(
+            Panel(
+                first_pass_categorization_prompt_str,
+                title="💭 First Pass Categorization Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+
     @weave.op
     async def draft_categorization(
         trace_id: str,
-        row_input: str,
-        row_output: str,
-        evaluation_evaluation_or_scorer_data: str,
+        row_input: str | dict,
+        row_output: str | dict,
+        evaluation_evaluation_or_scorer_data: str | dict,
         user_context: str,
         model: str,
         debug: bool = False,
@@ -724,27 +741,13 @@ async def run_pipeline(
             model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
             output_type=FirstPassCategorization,
         )
-        first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
+        
+        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
             user_context=user_context,
             row_input=row_input,
             row_output=row_output,
             evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
         )
-        if debug:
-            console.print(
-                Panel(
-                    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-                    title="First Pass Categorization System Prompt",
-                    border_style="blue",
-                )
-            )
-            console.print(
-                Panel(
-                    first_pass_categorization_prompt_str,
-                    title="First Pass Categorization Prompt",
-                    border_style="blue",
-                )
-            )
 
         draft_categorizations = await Runner.run(
             draft_categorization_llm,
@@ -844,136 +847,354 @@ async def run_pipeline(
                 )
             )
 
-    clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
-        num_traces=num_draft_categorizations
-    )
+    @weave.op
+    async def aggregate_categorizations(
+        draft_categorization_results_str: str,
+        num_draft_categorizations: int,
+        user_context: str,
+        model: str,
+        debug: bool = False,
+    ) -> ClusteringCategories:
 
-    clustering_prompt_str = CLUSTERING_PROMPT.format(
-        num_traces=num_draft_categorizations,
-        draft_categorizations_and_notes=draft_categorization_results_str,
-    )
+        clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
+            num_traces=num_draft_categorizations
+        )
 
-    review_categorizations_llm = Agent(
-        name="Review Agent",
-        instructions=clustering_system_prompt_str,
-        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-        output_type=ClusteringCategories,
-    )
+        clustering_prompt_str = CLUSTERING_PROMPT.format(
+            num_traces=num_draft_categorizations,
+            draft_categorizations_and_notes=draft_categorization_results_str,
+        )
 
-    if debug:
+        review_categorizations_llm = Agent(
+            name="Review Agent",
+            instructions=clustering_system_prompt_str,
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            output_type=ClusteringCategories,
+        )
+
+        if debug:
+            console.print(
+                Panel(
+                    clustering_system_prompt_str,
+                    title="🤖 Clustering System Prompt",
+                    border_style="blue",
+                    padding=(1, 2),
+                )
+            )
+            console.print(
+                Panel(
+                    clustering_prompt_str, 
+                    title="💭 Clustering Prompt", 
+                    border_style="blue",
+                    padding=(1, 2),
+                )
+            )
+
+        review_result = await Runner.run(
+            review_categorizations_llm,
+            clustering_prompt_str,
+        )
+
+        # Pretty print the review result
         console.print(
             Panel(
-                clustering_system_prompt_str,
-                title="Clustering System Prompt",
-                border_style="blue",
+                "[bold green]✨ Review completed successfully![/bold green]",
+                title="Review Result",
+                border_style="green",
             )
         )
-        console.print(
-            Panel(clustering_prompt_str, title="Clustering Prompt", border_style="blue")
-        )
+        return review_result.final_output
 
-    review_result = await Runner.run(
-        review_categorizations_llm,
-        clustering_prompt_str,
+
+    review_data = await aggregate_categorizations(
+        draft_categorization_results_str=draft_categorization_results_str,
+        num_draft_categorizations=num_draft_categorizations,
+        user_context=user_context,
+        model=model,
+        debug=debug,
     )
 
-    # Pretty print the review result
-    console.print(
-        Panel(
-            "[bold green]✨ Review completed successfully![/bold green]",
-            title="Review Result",
-            border_style="green",
+    console.print("=" * 80)
+    console.print("Candidate categories:")
+    console.print("-" * 80)
+    console.print(review_data.category_long_list_thinking)
+    console.print("-" * 80)
+    for category in review_data.task_failure_categories:
+        console.print(f"Category: {category.category_name}")
+        console.print(f"Description: {category.category_description}")
+        console.print(f"Notes: {category.category_notes}")
+        console.print("-" * 80)
+
+
+    # ----------------- STEP 3: Final classification -----------------
+
+    console.print("\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]")
+
+    # Add "other" category to the list
+    all_categories = review_data.task_failure_categories + [
+        Category(
+            thinking="This is the default category for failures that don't fit into any other category",
+            category_name="other",
+            category_description="Can be used if the evaluation failure sample can't be classified into one of the other classes",
+            category_notes="Default category for unclassifiable failures"
         )
-    )
+    ]
 
-    review_data = review_result.final_output.model_dump()
+    # Format categories for the prompt
+    categories_str = ""
+    for i, category in enumerate(all_categories):
+        categories_str += f"\n### Category {i + 1}: {category.category_name}\n"
+        categories_str += f"**Description:** {category.category_description}\n"
+        categories_str += f"**Notes:** {category.category_notes}\n"
 
-    # Display task failure categories in a nice table
-    if "task_failure_categories" in review_data:
-        categories_table = Table(
-            title="Clustered Task Failure Categories",
-            show_header=True,
-            header_style="bold magenta",
-        )
-        categories_table.add_column("Category", style="cyan", width=20)
-        categories_table.add_column("Description", style="white", width=40)
-        categories_table.add_column("Notes", style="dim", width=40)
-
-        for category in review_data["task_failure_categories"]:
-            categories_table.add_row(
-                category["category_name"],
-                category["category_description"],
-                category["category_notes"],
-            )
-
-        console.print(categories_table)
-
-    # ----------------- STEP 3: Final categorization -----------------
-
-    # Run a final test categorization
-    console.print("\n[bold blue]🧪 Running final test categorization...[/bold blue]")
-
-    @weave.op
-    async def category_review(
+    def construct_final_classification_prompt(
+        row_input: str | dict,
+        row_output: str | dict,
+        evaluation_evaluation_or_scorer_data: str | dict,
         user_context: str,
-        row_input: str,
-        row_output: str,
-        evaluation_evaluation_or_scorer_data: str,
-        proposed_failure_categories: list[str],
-    ) -> CategoryReview:
-        category_review_llm = Agent(
-            name="Final Classification",
-            instructions=CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-            output_type=CategoryReview,
-        )
+        available_categories_str: str,
+    ) -> str:
+        
+        # Convert dictionaries to JSON strings if needed
+        if isinstance(row_input, dict):
+            row_input = json.dumps(row_input, indent=2)
+        if isinstance(row_output, dict):
+            row_output = json.dumps(row_output, indent=2)
+        if isinstance(evaluation_evaluation_or_scorer_data, dict):
+            evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
 
-        category_review_prompt_str = CATEGORIZATION_REVIEW_PROMPT.format(
+        final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
             user_context=user_context,
             row_input=row_input,
             row_output=row_output,
             evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-            proposed_failure_categories=review_data["task_failure_categories"],
+            available_failure_categories=available_categories_str,
+        )
+        return final_classification_prompt_str
+
+    @weave.op
+    async def final_classification(
+        trace_id: str,
+        row_input: str,
+        row_output: str,
+        evaluation_evaluation_or_scorer_data: str,
+        user_context: str,
+        available_categories_str: str,
+        model: str,
+        debug: bool = False,
+    ) -> FinalClassificationResult:
+        
+        final_classification_llm = Agent(
+            name="Final Classification",
+            instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            output_type=FinalClassification,
         )
 
-        category_review_result = await Runner.run(
-            category_review_llm, category_review_prompt_str
-        )
-
-        return category_review_result.final_output
-
-    review_tasks = [
-        category_review(
+        final_classification_prompt_str = construct_final_classification_prompt(
+            row_input=row_input,
+            row_output=row_output,
+            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
             user_context=user_context,
-            row_input=trace_entry["inputs"],
-            row_output=trace_entry["output"],
-            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
-            proposed_failure_categories=review_data["task_failure_categories"],
+            available_categories_str=available_categories_str,
         )
-        for trace_entry in trace_data
-    ]
 
-    category_review_results = await asyncio.gather(*review_tasks)
-
-    # Pretty print the final result (using the first result as an example)
-    if category_review_results:
-        first_result = category_review_results[0]
-        final_result_panel = Panel(
-            f"""[bold cyan]Thinking:[/bold cyan] {first_result.thinking}...
-[bold cyan]Candidate Categories Appropriate:[/bold cyan] {first_result.candidate_categories_appropriate}
-[bold cyan]New Category Proposal:[/bold cyan] {first_result.new_category_proposal}""",
-            title="First Test Categorization Result",
-            border_style="magenta",
+        classification_result = await Runner.run(
+            final_classification_llm, final_classification_prompt_str
         )
-    else:
-        final_result_panel = Panel(
-            "[red]No category review results available[/red]",
-            title="First Test Categorization Result",
-            border_style="red",
-        )
-    console.print(final_result_panel)
 
-    console.print("[bold green]✅ Pipeline completed successfully![/bold green]")
+        final_classification_result = FinalClassificationResult(
+            trace_id=trace_id,
+            thinking=classification_result.final_output.thinking,
+            selected_category=classification_result.final_output.selected_category,
+            confidence_score=classification_result.final_output.confidence_score,
+            classification_notes=classification_result.final_output.classification_notes,
+        )
+
+        return final_classification_result
+
+    @weave.op
+    async def run_final_classification(
+        trace_data: list[dict],
+        user_context: str,
+        available_categories_str: str,
+        model: str,
+        debug: bool = False,
+    ) -> list[FinalClassificationResult]:
+        
+        classification_tasks = [
+            final_classification(
+                trace_id=trace_entry["id"],
+                row_input=trace_entry["inputs"],
+                row_output=trace_entry["output"],
+                evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+                user_context=user_context,
+                available_categories_str=available_categories_str,
+                model=model,
+                debug=debug,
+            )
+            for trace_entry in trace_data
+        ]
+
+        console.print("[yellow]⚡ Running final classification tasks...[/yellow]")
+        final_classification_results = await asyncio.gather(*classification_tasks)
+
+        return final_classification_results
+
+    if debug:
+        final_classification_prompt_str = construct_final_classification_prompt(
+            row_input=trace_data[0]["inputs"],
+            row_output=trace_data[0]["output"],
+            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+            user_context=user_context,
+            available_categories_str=categories_str,
+        )
+        console.print(
+            Panel(
+                FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+                title="🤖 Final Classification System Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print(
+            Panel(
+                final_classification_prompt_str,
+                title="💭 Final Classification Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+
+    final_classification_results = await run_final_classification(
+        trace_data=trace_data,
+        user_context=user_context,
+        available_categories_str=categories_str,
+        model=model,
+        debug=debug,
+    )
+
+    # ----------------- STEP 4: Generate Evaluation Report -----------------
+    
+    console.print("\n[bold blue]📊 STEP 4: Generating evaluation report...[/bold blue]")
+    
+    # Create a summary of classifications
+    classification_summary = {}
+    total_failures = len(final_classification_results)
+    
+    for result in final_classification_results:
+        category = result.selected_category
+        if category not in classification_summary:
+            classification_summary[category] = {
+                "traces": [],
+                "category_info": None
+            }
+        classification_summary[category]["traces"].append({
+            "trace_id": result.trace_id,
+            "confidence": result.confidence_score,
+            "notes": result.classification_notes
+        })
+    
+    # Get category info from all_categories
+    for category in all_categories:
+        if category.category_name in classification_summary:
+            classification_summary[category.category_name]["category_info"] = category
+    
+    # Sort categories by count (descending)
+    sorted_categories = sorted(
+        classification_summary.items(), 
+        key=lambda x: len(x[1]["traces"]), 
+        reverse=True
+    )
+    
+    # Generate report
+    from datetime import datetime
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    # Get evaluation name from eval_data
+    eval_name = eval_data["evaluation"].get("display_name", eval_id)
+    
+    # Create the summary table first
+    from rich import box
+    summary_table = Table(
+        title="Classification Summary",
+        show_header=True,
+        header_style="bold magenta",
+        box=box.ROUNDED,
+    )
+    summary_table.add_column("Category", style="cyan", width=40)
+    summary_table.add_column("Count", style="yellow", width=15)
+    summary_table.add_column("Percentage", style="green", width=15)
+    
+    for category_name, category_data in sorted_categories:
+        traces = category_data["traces"]
+        count = len(traces)
+        percentage = (count / total_failures) * 100
+        display_name = category_name.replace("_", " ").title()
+        
+        summary_table.add_row(
+            display_name,
+            str(count),
+            f"{percentage:.1f}%"
+        )
+    
+    # Display the summary table at the top
+    console.print("\n")
+    console.print(summary_table)
+    console.print("\n")
+    
+    report = f"## {eval_name} Evaluation Report - {current_time}\n\n"
+    report += f"### Failure Categories:\n\n"
+    
+    for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
+        traces = category_data["traces"]
+        category_info = category_data["category_info"]
+        count = len(traces)
+        percentage = (count / total_failures) * 100
+        
+        # Format category name for display
+        display_name = category_name.replace("_", " ").title()
+        
+        report += f"{idx}. **{display_name}**\n\n"
+        report += f"Count: {count} ({percentage:.1f}% of failures)\n\n"
+        
+        if category_info:
+            report += f"{category_info.category_description}\n\n"
+        
+        # Add examples section only if there are notes to show
+        has_examples = any(trace["notes"] for trace in traces[:5])
+        if has_examples:
+            report += "Examples:\n\n"
+            report += "```python\n"
+            
+            # Show up to 5 example trace IDs and notes
+            for i, trace in enumerate(traces[:5]):
+                if trace["notes"]:
+                    report += f"# Trace: {trace['trace_id']}\n"
+                    report += f"# {trace['notes']}\n"
+                    if i < min(4, len(traces) - 1):
+                        report += "\n"
+            
+            report += "```\n\n"
+        
+        # Add list of all trace IDs for this category
+        report += f"Trace IDs for this category:\n"
+        for trace in traces:
+            report += f"- {trace['trace_id']}\n"
+        report += "\n"
+        
+        if idx < len(sorted_categories):
+            report += "\n"
+    
+    report += "~" * 80 + "\n\n"
+    report += "END REPORT\n"
+    
+    # Display the report
+    console.print("\n" + "=" * 80)
+    console.print(report)
+    console.print("=" * 80)
+    
+    console.print("\n[bold green]✅ Pipeline completed successfully![/bold green]")
 
 
 if __name__ == "__main__":
@@ -1004,9 +1225,6 @@ What the user is trying to evaluate in their AI system:
 </user_eval_context>
 
 """
-
-    FAILURE_COLUMN = "output.scores.failure"
-    FAILURE_CONDITION = "output.scores.failure > 0.5"
 
     model = "gemini/gemini-2.5-pro"
 
