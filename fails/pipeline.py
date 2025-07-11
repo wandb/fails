@@ -1,19 +1,19 @@
 import asyncio
+import json
 import logging
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
-import json
+from typing import Any, Dict, List, Optional, Tuple
+
 import litellm
 import simple_parsing
 import weave
 import yaml
 from agents import Agent, Runner, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
-from fails.cli.arrow_selector import simple_arrow_selection
-from fails.cli.failure_selector import interactive_failure_column_selection
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -21,8 +21,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from fails import weave_query
+from fails.cli.arrow_selector import simple_arrow_selection
+from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
     CATEGORIZATION_REVIEW_PROMPT,
     CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
@@ -40,12 +40,12 @@ from fails.prompts import (
     FirstPassCategorization,
     FirstPassCategorizationResult,
 )
+from fails.utis import filter_trace_data_by_columns
 from fails.weave_query import (
     TraceDepth,
     get_available_columns,
     query_evaluation_data,
 )
-from fails.utis import filter_trace_data_by_columns
 
 load_dotenv()
 set_tracing_disabled(True)
@@ -507,8 +507,430 @@ def get_column_preferences(
         
     return failure_config, columns_for_query
 
+
+def construct_first_pass_categorization_prompt(
+    row_input: dict | str,
+    row_output: dict | str,
+    evaluation_evaluation_or_scorer_data: dict | str,
+    user_context: str,
+) -> str:
+    # Convert to JSON strings if needed
+    if isinstance(row_input, dict):
+        row_input = json.dumps(row_input, indent=2)
+    if isinstance(row_output, dict):
+        row_output = json.dumps(row_output, indent=2)
+    if isinstance(evaluation_evaluation_or_scorer_data, dict):
+        evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
+        
+    first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
+        user_context=user_context,
+        row_input=row_input,
+        row_output=row_output,
+        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+    )
+    return first_pass_categorization_prompt_str
+
+@weave.op
+async def draft_categorization(
+    trace_id: str,
+    row_input: str | dict,
+    row_output: str | dict,
+    evaluation_evaluation_or_scorer_data: str | dict,
+    user_context: str,
+    model: str,
+    debug: bool = False,
+) -> FirstPassCategorizationResult:
+    draft_categorization_llm = Agent(
+        name="Row by Row",
+        instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
+        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+        output_type=FirstPassCategorization,
+    )
+    
+    first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
+        user_context=user_context,
+        row_input=row_input,
+        row_output=row_output,
+        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+    )
+
+    draft_categorizations = await Runner.run(
+        draft_categorization_llm,
+        first_pass_categorization_prompt_str,
+    )
+
+    draft_categorization_result = FirstPassCategorizationResult(
+        trace_id=trace_id,
+        thinking=draft_categorizations.final_output.thinking,
+        first_pass_categories=draft_categorizations.final_output.first_pass_categories,
+    )
+
+    return draft_categorization_result
+
+@weave.op
+async def run_draft_categorization(
+    trace_data: dict,
+    user_context: str,
+    model: str,
+    debug: bool = False,
+) -> list[FirstPassCategorizationResult]:
+
+    # Create tasks with trace_id
+    tasks = [
+        draft_categorization(
+            trace_id=trace_entry["id"],
+            row_input=trace_entry["inputs"],
+            row_output=trace_entry["output"],
+            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+            user_context=user_context,
+            model=model,
+            debug=debug,
+        )
+        for trace_entry in trace_data
+    ]
+
+    draft_categorization_results = await asyncio.gather(*tasks)
+
+    return draft_categorization_results
+
+def construct_final_classification_prompt(
+    row_input: str | dict,
+    row_output: str | dict,
+    evaluation_evaluation_or_scorer_data: str | dict,
+    user_context: str,
+    available_categories_str: str,
+) -> str:
+    
+    # Convert dictionaries to JSON strings if needed
+    if isinstance(row_input, dict):
+        row_input = json.dumps(row_input, indent=2)
+    if isinstance(row_output, dict):
+        row_output = json.dumps(row_output, indent=2)
+    if isinstance(evaluation_evaluation_or_scorer_data, dict):
+        evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
+
+    final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
+        user_context=user_context,
+        row_input=row_input,
+        row_output=row_output,
+        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        available_failure_categories=available_categories_str,
+    )
+    return final_classification_prompt_str
+
+@weave.op
+async def final_classification(
+    trace_id: str,
+    row_input: str,
+    row_output: str,
+    evaluation_evaluation_or_scorer_data: str,
+    user_context: str,
+    available_categories_str: str,
+    model: str,
+) -> FinalClassificationResult:
+    
+    final_classification_llm = Agent(
+        name="Final Classification",
+        instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+        output_type=FinalClassification,
+    )
+
+    final_classification_prompt_str = construct_final_classification_prompt(
+        row_input=row_input,
+        row_output=row_output,
+        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        user_context=user_context,
+        available_categories_str=available_categories_str,
+    )
+
+    classification_result = await Runner.run(
+        final_classification_llm, final_classification_prompt_str
+    )
+
+    final_classification_result = FinalClassificationResult(
+        trace_id=trace_id,
+        thinking=classification_result.final_output.thinking,
+        selected_category=classification_result.final_output.selected_category,
+        confidence_score=classification_result.final_output.confidence_score,
+        classification_notes=classification_result.final_output.classification_notes,
+    )
+
+    return final_classification_result
+
+@weave.op
+async def run_final_classification(
+    trace_data: list[dict],
+    user_context: str,
+    available_categories_str: str,
+    model: str,
+    debug: bool = False,
+) -> list[FinalClassificationResult]:
+    
+    classification_tasks = [
+        final_classification(
+            trace_id=trace_entry["id"],
+            row_input=trace_entry["inputs"],
+            row_output=trace_entry["output"],
+            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+            user_context=user_context,
+            available_categories_str=available_categories_str,
+            model=model,
+        )
+        for trace_entry in trace_data
+    ]
+
+    final_classification_results = await asyncio.gather(*classification_tasks)
+
+    return final_classification_results
+
+
+def construct_clustering_prompt(
+    draft_categorizations_and_notes: str,
+    num_traces: int,
+) -> str:
+    clustering_prompt_str = CLUSTERING_PROMPT.format(
+        num_traces=num_traces,
+        draft_categorizations_and_notes=draft_categorizations_and_notes,
+    )
+    return clustering_prompt_str
+
+@weave.op
+async def aggregate_categorizations(
+    draft_categorization_results_str: str,
+    num_draft_categorizations: int,
+    user_context: str,
+    model: str,
+    debug: bool = False,
+) -> ClusteringCategories:
+
+    clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
+        num_traces=num_draft_categorizations
+    )
+
+    clustering_prompt_str = construct_clustering_prompt(
+        draft_categorizations_and_notes=draft_categorization_results_str,
+        num_traces=num_draft_categorizations,
+    )
+
+    review_categorizations_llm = Agent(
+        name="Review Agent",
+        instructions=clustering_system_prompt_str,
+        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+        output_type=ClusteringCategories,
+    )
+
+    review_result = await Runner.run(
+        review_categorizations_llm,
+        clustering_prompt_str,
+    )
+
+    return review_result.final_output
+
+
 @weave.op
 async def run_pipeline(
+    trace_data: list[dict],
+    user_context: str,
+    model: str,
+    debug: bool = False,
+    console: Console = Console(),
+):
+    # ----------------- STEP 1: Draft categorization -----------------
+    console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
+
+    if debug:
+        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
+            row_input=trace_data[0]["inputs"],
+            row_output=trace_data[0]["output"],
+            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+            user_context=user_context,
+        )
+        console.print(
+            Panel(
+                FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
+                title="🤖 First Pass Categorization System Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print(
+            Panel(
+                first_pass_categorization_prompt_str,
+                title="💭 First Pass Categorization Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+
+    draft_categorization_results = await run_draft_categorization(
+        trace_data=trace_data,
+        user_context=user_context,
+        model=model,
+        debug=debug,
+    )
+
+    num_draft_categorizations = len(draft_categorization_results)
+
+    # Create a nice display for draft categorization results
+    console.print(
+        Panel(
+            f"[bold green]✅ Completed {num_draft_categorizations} draft categorizations[/bold green]",
+            title="Draft Categorization Results",
+            border_style="green",
+        )
+    )
+
+    # ----------------- STEP 2: Review categorizations -----------------
+
+    console.print("\n[bold blue]🔍 STEP 2: Reviewing categorizations...[/bold blue]")
+
+    # Create resclustering prompt (needed for the agent)
+    draft_categorization_results_str = "\n" + "=" * 80 + "\n"
+
+    for c_i, draft_categorization_result in enumerate(draft_categorization_results):
+        draft_categorization_results_str += (
+            f"### Evaluation Trace ID: {draft_categorization_result.trace_id}\n\n"
+        )
+
+        if debug:
+            result_table = Table(show_header=True, box=None, padding=(0, 1))
+            result_table.add_column("Candidate Category", style="cyan", width=120)
+            result_table.add_column("Category Description", style="white", width=120)
+            result_table.add_column("Eval Failure Note", style="dim", width=120)
+
+        for i, first_pass_category in enumerate(draft_categorization_result.first_pass_categories):
+            draft_categorization_results_str += (
+                f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
+            )
+            draft_categorization_results_str += (
+                f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
+            )
+            draft_categorization_results_str += (
+                f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
+            )
+            if debug:
+                result_table.add_row(first_pass_category.category_name, first_pass_category.category_description, first_pass_category.eval_failure_note)
+        
+        draft_categorization_results_str += "\n" + "=" * 80 + "\n"
+
+        if debug:
+            console.print(
+                Panel(
+                    result_table, title=f"[green]Trace {c_i + 1}[/green]", border_style="green"
+                )
+            )
+
+    if debug:
+        console.print(
+            Panel(
+                CLUSTERING_SYSTEM_PROMPT.format(num_traces=num_draft_categorizations),
+                title="🤖 Clustering System Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        clustering_prompt_str = construct_clustering_prompt(
+            draft_categorizations_and_notes=draft_categorization_results_str,
+            num_traces=num_draft_categorizations,
+        )
+        console.print(
+            Panel(
+                clustering_prompt_str, 
+                title="💭 Clustering Prompt", 
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+
+    review_data = await aggregate_categorizations(
+        draft_categorization_results_str=draft_categorization_results_str,
+        num_draft_categorizations=num_draft_categorizations,
+        user_context=user_context,
+        model=model,
+        debug=debug,
+    )
+
+                        # Pretty print the review result
+    console.print(
+        Panel(
+            "[bold green]✨ Review completed successfully![/bold green]",
+            title="Review Result",
+            border_style="green",
+        )
+    )
+
+    console.print("=" * 80)
+    console.print("Candidate categories:")
+    console.print("-" * 80)
+    console.print(review_data.category_long_list_thinking)
+    console.print("-" * 80)
+    for category in review_data.task_failure_categories:
+        console.print(f"Category: {category.category_name}")
+        console.print(f"Description: {category.category_description}")
+        console.print(f"Notes: {category.category_notes}")
+        console.print("-" * 80)
+
+
+    # ----------------- STEP 3: Final classification -----------------
+
+    console.print("\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]")
+
+    # Add "other" category to the list
+    all_categories = review_data.task_failure_categories + [
+        Category(
+            thinking="This is the default category for failures that don't fit into any other category",
+            category_name="other",
+            category_description="Can be used if the evaluation failure sample can't be classified into one of the other classes",
+            category_notes="Default category for unclassifiable failures"
+        )
+    ]
+
+    # Format categories for the prompt
+    categories_str = ""
+    for i, category in enumerate(all_categories):
+        categories_str += f"\n### Category {i + 1}: {category.category_name}\n"
+        categories_str += f"**Description:** {category.category_description}\n"
+        categories_str += f"**Notes:** {category.category_notes}\n"
+
+    if debug:
+        final_classification_prompt_str = construct_final_classification_prompt(
+            row_input=trace_data[0]["inputs"],
+            row_output=trace_data[0]["output"],
+            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+            user_context=user_context,
+            available_categories_str=categories_str,
+        )
+        console.print(
+            Panel(
+                FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+                title="🤖 Final Classification System Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print(
+            Panel(
+                final_classification_prompt_str,
+                title="💭 Final Classification Prompt",
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+
+    final_classification_results = await run_final_classification(
+        trace_data=trace_data,
+        user_context=user_context,
+        available_categories_str=categories_str,
+        model=model,
+        debug=debug,
+    )
+    return final_classification_results, all_categories
+
+
+
+@weave.op
+async def run_extract_and_classify_pipeline(
     eval_id: str,
     user_context: str,
     debug: bool,
@@ -674,407 +1096,16 @@ async def run_pipeline(
 
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
 
-    # ----------------- STEP 1: Draft categorization -----------------
-
-    console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
-    
-    def construct_first_pass_categorization_prompt(
-        row_input: dict | str,
-        row_output: dict | str,
-        evaluation_evaluation_or_scorer_data: dict | str,
-        user_context: str,
-    ) -> str:
-        # Convert to JSON strings if needed
-        if isinstance(row_input, dict):
-            row_input = json.dumps(row_input, indent=2)
-        if isinstance(row_output, dict):
-            row_output = json.dumps(row_output, indent=2)
-        if isinstance(evaluation_evaluation_or_scorer_data, dict):
-            evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
-            
-        first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
-            user_context=user_context,
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-        )
-        return first_pass_categorization_prompt_str
-
-    if debug:
-        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
-            row_input=trace_data[0]["inputs"],
-            row_output=trace_data[0]["output"],
-            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
-            user_context=user_context,
-        )
-        console.print(
-            Panel(
-                FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-                title="🤖 First Pass Categorization System Prompt",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-        console.print(
-            Panel(
-                first_pass_categorization_prompt_str,
-                title="💭 First Pass Categorization Prompt",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-
-    @weave.op
-    async def draft_categorization(
-        trace_id: str,
-        row_input: str | dict,
-        row_output: str | dict,
-        evaluation_evaluation_or_scorer_data: str | dict,
-        user_context: str,
-        model: str,
-        debug: bool = False,
-    ) -> FirstPassCategorizationResult:
-        draft_categorization_llm = Agent(
-            name="Row by Row",
-            instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-            output_type=FirstPassCategorization,
-        )
-        
-        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
-            user_context=user_context,
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-        )
-
-        draft_categorizations = await Runner.run(
-            draft_categorization_llm,
-            first_pass_categorization_prompt_str,
-        )
-
-        draft_categorization_result = FirstPassCategorizationResult(
-            trace_id=trace_id,
-            thinking=draft_categorizations.final_output.thinking,
-            first_pass_categories=draft_categorizations.final_output.first_pass_categories,
-        )
-
-        return draft_categorization_result
-
-    @weave.op
-    async def run_draft_categorization(
-        trace_data: dict,
-        user_context: str,
-        model: str,
-        debug: bool = False,
-    ) -> list[FirstPassCategorizationResult]:
-
-        # Create tasks with trace_id
-        tasks = [
-            draft_categorization(
-                trace_id=trace_entry["id"],
-                row_input=trace_entry["inputs"],
-                row_output=trace_entry["output"],
-                evaluation_evaluation_or_scorer_data=trace_entry["scores"],
-                user_context=user_context,
-                model=model,
-                debug=debug,
-            )
-            for trace_entry in trace_data
-        ]
-
-        console.print("[yellow]⚡ Running categorization tasks...[/yellow]")
-        draft_categorization_results = await asyncio.gather(*tasks)
-
-        return draft_categorization_results
-
-    draft_categorization_results = await run_draft_categorization(
+    final_classification_results, all_categories = await run_pipeline(
         trace_data=trace_data,
         user_context=user_context,
         model=model,
         debug=debug,
+        console=console,
     )
 
-    num_draft_categorizations = len(draft_categorization_results)
+    # ----------------- Generate Evaluation Report -----------------
 
-     # Create a nice display for draft categorization results
-    console.print(
-        Panel(
-            f"[bold green]✅ Completed {num_draft_categorizations} draft categorizations[/bold green]",
-            title="Draft Categorization Results",
-            border_style="green",
-        )
-    )
-
-    # ----------------- STEP 2: Review categorizations -----------------
-
-    console.print("\n[bold blue]🔍 STEP 2: Reviewing categorizations...[/bold blue]")
-
-    # Create resclustering prompt (needed for the agent)
-    draft_categorization_results_str = "\n" + "=" * 80 + "\n"
-
-    for c_i, draft_categorization_result in enumerate(draft_categorization_results):
-        draft_categorization_results_str += (
-            f"### Evaluation Trace ID: {draft_categorization_result.trace_id}\n\n"
-        )
-
-        if debug:
-            result_table = Table(show_header=True, box=None, padding=(0, 1))
-            result_table.add_column("Candidate Category", style="cyan", width=120)
-            result_table.add_column("Category Description", style="white", width=120)
-            result_table.add_column("Eval Failure Note", style="dim", width=120)
-
-        for i, first_pass_category in enumerate(draft_categorization_result.first_pass_categories):
-            draft_categorization_results_str += (
-                f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
-            )
-            draft_categorization_results_str += (
-                f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
-            )
-            draft_categorization_results_str += (
-                f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
-            )
-            if debug:
-                result_table.add_row(first_pass_category.category_name, first_pass_category.category_description, first_pass_category.eval_failure_note)
-        
-        draft_categorization_results_str += "\n" + "=" * 80 + "\n"
-
-        if debug:
-            console.print(
-                Panel(
-                    result_table, title=f"[green]Trace {c_i + 1}[/green]", border_style="green"
-                )
-            )
-
-    @weave.op
-    async def aggregate_categorizations(
-        draft_categorization_results_str: str,
-        num_draft_categorizations: int,
-        user_context: str,
-        model: str,
-        debug: bool = False,
-    ) -> ClusteringCategories:
-
-        clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
-            num_traces=num_draft_categorizations
-        )
-
-        clustering_prompt_str = CLUSTERING_PROMPT.format(
-            num_traces=num_draft_categorizations,
-            draft_categorizations_and_notes=draft_categorization_results_str,
-        )
-
-        review_categorizations_llm = Agent(
-            name="Review Agent",
-            instructions=clustering_system_prompt_str,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-            output_type=ClusteringCategories,
-        )
-
-        if debug:
-            console.print(
-                Panel(
-                    clustering_system_prompt_str,
-                    title="🤖 Clustering System Prompt",
-                    border_style="blue",
-                    padding=(1, 2),
-                )
-            )
-            console.print(
-                Panel(
-                    clustering_prompt_str, 
-                    title="💭 Clustering Prompt", 
-                    border_style="blue",
-                    padding=(1, 2),
-                )
-            )
-
-        review_result = await Runner.run(
-            review_categorizations_llm,
-            clustering_prompt_str,
-        )
-
-        # Pretty print the review result
-        console.print(
-            Panel(
-                "[bold green]✨ Review completed successfully![/bold green]",
-                title="Review Result",
-                border_style="green",
-            )
-        )
-        return review_result.final_output
-
-
-    review_data = await aggregate_categorizations(
-        draft_categorization_results_str=draft_categorization_results_str,
-        num_draft_categorizations=num_draft_categorizations,
-        user_context=user_context,
-        model=model,
-        debug=debug,
-    )
-
-    console.print("=" * 80)
-    console.print("Candidate categories:")
-    console.print("-" * 80)
-    console.print(review_data.category_long_list_thinking)
-    console.print("-" * 80)
-    for category in review_data.task_failure_categories:
-        console.print(f"Category: {category.category_name}")
-        console.print(f"Description: {category.category_description}")
-        console.print(f"Notes: {category.category_notes}")
-        console.print("-" * 80)
-
-
-    # ----------------- STEP 3: Final classification -----------------
-
-    console.print("\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]")
-
-    # Add "other" category to the list
-    all_categories = review_data.task_failure_categories + [
-        Category(
-            thinking="This is the default category for failures that don't fit into any other category",
-            category_name="other",
-            category_description="Can be used if the evaluation failure sample can't be classified into one of the other classes",
-            category_notes="Default category for unclassifiable failures"
-        )
-    ]
-
-    # Format categories for the prompt
-    categories_str = ""
-    for i, category in enumerate(all_categories):
-        categories_str += f"\n### Category {i + 1}: {category.category_name}\n"
-        categories_str += f"**Description:** {category.category_description}\n"
-        categories_str += f"**Notes:** {category.category_notes}\n"
-
-    def construct_final_classification_prompt(
-        row_input: str | dict,
-        row_output: str | dict,
-        evaluation_evaluation_or_scorer_data: str | dict,
-        user_context: str,
-        available_categories_str: str,
-    ) -> str:
-        
-        # Convert dictionaries to JSON strings if needed
-        if isinstance(row_input, dict):
-            row_input = json.dumps(row_input, indent=2)
-        if isinstance(row_output, dict):
-            row_output = json.dumps(row_output, indent=2)
-        if isinstance(evaluation_evaluation_or_scorer_data, dict):
-            evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
-
-        final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
-            user_context=user_context,
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-            available_failure_categories=available_categories_str,
-        )
-        return final_classification_prompt_str
-
-    @weave.op
-    async def final_classification(
-        trace_id: str,
-        row_input: str,
-        row_output: str,
-        evaluation_evaluation_or_scorer_data: str,
-        user_context: str,
-        available_categories_str: str,
-        model: str,
-        debug: bool = False,
-    ) -> FinalClassificationResult:
-        
-        final_classification_llm = Agent(
-            name="Final Classification",
-            instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-            output_type=FinalClassification,
-        )
-
-        final_classification_prompt_str = construct_final_classification_prompt(
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-            user_context=user_context,
-            available_categories_str=available_categories_str,
-        )
-
-        classification_result = await Runner.run(
-            final_classification_llm, final_classification_prompt_str
-        )
-
-        final_classification_result = FinalClassificationResult(
-            trace_id=trace_id,
-            thinking=classification_result.final_output.thinking,
-            selected_category=classification_result.final_output.selected_category,
-            confidence_score=classification_result.final_output.confidence_score,
-            classification_notes=classification_result.final_output.classification_notes,
-        )
-
-        return final_classification_result
-
-    @weave.op
-    async def run_final_classification(
-        trace_data: list[dict],
-        user_context: str,
-        available_categories_str: str,
-        model: str,
-        debug: bool = False,
-    ) -> list[FinalClassificationResult]:
-        
-        classification_tasks = [
-            final_classification(
-                trace_id=trace_entry["id"],
-                row_input=trace_entry["inputs"],
-                row_output=trace_entry["output"],
-                evaluation_evaluation_or_scorer_data=trace_entry["scores"],
-                user_context=user_context,
-                available_categories_str=available_categories_str,
-                model=model,
-                debug=debug,
-            )
-            for trace_entry in trace_data
-        ]
-
-        console.print("[yellow]⚡ Running final classification tasks...[/yellow]")
-        final_classification_results = await asyncio.gather(*classification_tasks)
-
-        return final_classification_results
-
-    if debug:
-        final_classification_prompt_str = construct_final_classification_prompt(
-            row_input=trace_data[0]["inputs"],
-            row_output=trace_data[0]["output"],
-            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
-            user_context=user_context,
-            available_categories_str=categories_str,
-        )
-        console.print(
-            Panel(
-                FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-                title="🤖 Final Classification System Prompt",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-        console.print(
-            Panel(
-                final_classification_prompt_str,
-                title="💭 Final Classification Prompt",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-
-    final_classification_results = await run_final_classification(
-        trace_data=trace_data,
-        user_context=user_context,
-        available_categories_str=categories_str,
-        model=model,
-        debug=debug,
-    )
-
-    # ----------------- STEP 4: Generate Evaluation Report -----------------
-    
     console.print("\n[bold blue]📊 STEP 4: Generating evaluation report...[/bold blue]")
     
     # Create a summary of classifications
@@ -1107,7 +1138,6 @@ async def run_pipeline(
     )
     
     # Generate report
-    from datetime import datetime
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     # Get evaluation name from eval_data
@@ -1184,6 +1214,7 @@ async def run_pipeline(
     console.print("\n[bold green]✅ Pipeline completed successfully![/bold green]")
 
 
+
 if __name__ == "__main__":
     eval_id = "0197a72d-2704-7ced-8c07-0fa1e0ab0557"
 
@@ -1225,7 +1256,7 @@ What the user is trying to evaluate in their AI system:
     weave.init(f"{args.wandb_logging_entity}/{args.wandb_logging_project}")
 
     asyncio.run(
-        run_pipeline(
+        run_extract_and_classify_pipeline(
             eval_id=eval_id,
             user_context=user_context_str,
             debug=args.debug,
