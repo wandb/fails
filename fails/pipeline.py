@@ -304,7 +304,6 @@ def get_column_preferences(
     console.print("\n[bold blue]🔍 Failure Column Configuration[/bold blue]")
     
     # Get all available columns first
-    console.print("Discovering available columns...")
     column_info = get_available_columns(
         eval_id=eval_id,
         wandb_entity=wandb_entity,
@@ -632,7 +631,7 @@ async def run_pipeline(
 
     console.print("\n[dim]CHILDREN:[/dim]")
     console.print(
-        f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]"
+        f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]\n"
     )
     for i, trace in enumerate(eval_data["children"][:3]):
         # Since we've already filtered the data, we can use it directly
@@ -645,7 +644,7 @@ async def run_pipeline(
 
         trace_data.append(trace_entry)
 
-        if debug:
+        if debug and i == 0:
             # Create a table for trace details
             trace_table = Table(
                 title=f"Trace {i + 1} Details",
@@ -1114,36 +1113,27 @@ async def run_pipeline(
     # Get evaluation name from eval_data
     eval_name = eval_data["evaluation"].get("display_name", eval_id)
     
-    # Create the summary table first
-    from rich import box
-    summary_table = Table(
-        title="Classification Summary",
-        show_header=True,
-        header_style="bold magenta",
-        box=box.ROUNDED,
-    )
-    summary_table.add_column("Category", style="cyan", width=40)
-    summary_table.add_column("Count", style="yellow", width=15)
-    summary_table.add_column("Percentage", style="green", width=15)
+    report = f"## {eval_name} Evaluation Report - {current_time}\n\n"
     
+    # Add summary table to the report
+    # Calculate max widths for alignment
+    max_category_width = max(len(category_name.replace("_", " ").title()) for category_name in classification_summary.keys())
+    max_category_width = max(max_category_width, len("Category"))
+    
+    # Create the table header
+    report += f"{'Category'.ljust(max_category_width)} | {'Count'.center(10)} | {'Percentage'.center(12)}\n"
+    report += f"{'-' * max_category_width} | {'-' * 10} | {'-' * 12}\n"
+    
+    # Add table rows
     for category_name, category_data in sorted_categories:
         traces = category_data["traces"]
         count = len(traces)
         percentage = (count / total_failures) * 100
         display_name = category_name.replace("_", " ").title()
         
-        summary_table.add_row(
-            display_name,
-            str(count),
-            f"{percentage:.1f}%"
-        )
+        report += f"{display_name.ljust(max_category_width)} | {str(count).center(10)} | {f'{percentage:.1f}%'.center(12)}\n"
     
-    # Display the summary table at the top
-    console.print("\n")
-    console.print(summary_table)
-    console.print("\n")
-    
-    report = f"## {eval_name} Evaluation Report - {current_time}\n\n"
+    report += "\n"
     report += f"### Failure Categories:\n\n"
     
     for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
@@ -1165,20 +1155,17 @@ async def run_pipeline(
         has_examples = any(trace["notes"] for trace in traces[:5])
         if has_examples:
             report += "Examples:\n\n"
-            report += "```python\n"
             
             # Show up to 5 example trace IDs and notes
             for i, trace in enumerate(traces[:5]):
                 if trace["notes"]:
-                    report += f"# Trace: {trace['trace_id']}\n"
-                    report += f"# {trace['notes']}\n"
+                    report += f"  Trace: {trace['trace_id']}\n"
+                    report += f"  {trace['notes']}\n"
                     if i < min(4, len(traces) - 1):
                         report += "\n"
-            
-            report += "```\n\n"
         
         # Add list of all trace IDs for this category
-        report += f"Trace IDs for this category:\n"
+        report += f"\nTrace IDs for this category:\n"
         for trace in traces:
             report += f"- {trace['trace_id']}\n"
         report += "\n"
