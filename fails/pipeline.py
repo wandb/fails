@@ -17,9 +17,11 @@ from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+import weave
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fails import weave_query
 from fails.weave_query import (
     TraceDepth,
     get_available_columns,
@@ -32,16 +34,20 @@ set_tracing_disabled(True)
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
 
+os.environ["LLM_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
 @dataclass
 class Args:
     """Script arguments for the pipeline."""
 
     model: str = "gemini/gemini-2.5-pro"
-    api_key: str | None = os.getenv("GOOGLE_API_KEY")
     debug: bool = False
     force_column_selection: bool = False
     config_file: str = os.path.expanduser("~/.wandb/failure_categorization_config.yaml")
+    wandb_entity: str = "wandb-applied-ai-team"
+    wandb_project: str = "eval-failures"
+    wandb_logging_entity: str = "wandb-applied-ai-team"
+    wandb_logging_project: str = "eval-failures-testing"
 
 
 EVALUATION_FAILURE_DEFINITION = """An evaluation failure is defined as the output of a single row \
@@ -127,9 +133,22 @@ their AI system.
 ## Analyse
 
 With the above user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output.
+task failure categories for the given row input and row output. 
+
+### User-provided eval reasoning
+
+Be cautious if the users eval data has provided a 'thinking', 'reasoning' or 'notion' section that has come form a LLM. \
+These 'reasons' for the eval decision should not be treated as absolute truth as the LLM can still possibly be hallucinating \
+or making up reasons for the eval decision. You can still use this data, just be cautious.
+
 """
 
+class FirstPassCategory(BaseModel):
+    """A first pass categorization of a single evaluation failure."""
+
+    category_name: str = Field(description="The name of the category.")
+    category_description: str = Field(description="A high-level, generic, short description and justification for the category.")
+    eval_failure_note: str = Field(description="A sentence or two of notes sepcific to what was observed in this individual evaluation failure.")
 
 class FirstPassCategorization(BaseModel):
     """First pass classification of a single evaluation failure."""
@@ -137,11 +156,8 @@ class FirstPassCategorization(BaseModel):
     thinking: str = Field(
         description="A detailed thinking process of the classification."
     )
-    notes: str = Field(description="A sentence or two of notes for the classification.")
-    candidate_task_failure_categories: list[str] = Field(
-        description="""A list of candidate task failure categories.\
-Keep all category names lowercase, concise and separated by '_'. If a trace doesn't fit into any of the defined task \
-failure categories, it should be classified as "other"."""
+    first_pass_categories: list[FirstPassCategory] = Field(
+        description="A short list of 1-3 first pass categories for the evaluation failure."
     )
 
 
@@ -192,6 +208,7 @@ Output a list of maximum {MAX_N_TASK_FAILURE_CATEGORIES} task failure categories
 {MAX_N_TASK_FAILURE_CATEGORIES} if you think that's appropriate.
 """
 
+## ----------------- Step 3 - Category Review -----------------
 
 class Category(BaseModel):
     """A task failure category."""
@@ -226,6 +243,74 @@ If a trace doesn't fit into any of the defined task failure categories, it shoul
     )
 
 
+CATEGORIZATION_REVIEW_SYSTEM_PROMPT = """
+You are a helpful assistant that categorizes task failure categories.
+
+Given a proposed list of evaluation failure categories and the eval failtures themselves, determine \
+if the proposed categories are appropriate.
+
+If the proposed categories are appropriate, return the proposed categories.
+
+If the proposed categories are not appropriate, return a new list of categories that are appropriate \
+as well as a note explaining why the proposed categories are not appropriate.
+"""
+
+CATEGORIZATION_REVIEW_PROMPT = """
+Given the following user context and evaluation failure data, please output a draft set of notes and candidate \
+task failure categories for the given row input and row output.
+
+## User Context
+
+<user_context>
+{user_context}
+</user_context>
+
+## Evaluation Failure Data
+
+### Inputs that were given to the system
+<row_input>
+{{row_input}}
+</row_input>
+
+### Outputs that were evaluated to be failures
+<row_output>
+{{row_output}}
+</row_output>
+
+### Evaluation or Scorer data and metadata
+
+<evaluation_evaluation_or_scorer_data>
+{{evaluation_evaluation_or_scorer_data}}
+</evaluation_evaluation_or_scorer_data>
+
+## Proposed list of available failure categories
+
+
+<proposed_failure_categories>
+{{proposed_failure_categories}}
+</proposed_failure_categories>
+
+Does the eval failure you can see above fall into any of the proposed failure categories?
+"""
+class CategoryReview(BaseModel):
+    """A task failure category."""
+
+    thinking: str = Field(
+        description="A detailed reasoning process behind the selection of the category \
+name, description and notes."
+    )
+    candidate_categories_appropriate: bool = Field(
+        description="Whether the proposed failure categories are appropriate for the eval failure."
+    )
+    new_category_proposal: Category | None = Field(
+        description="If the proposed failure categories are not appropriate, return a new \
+category that is appropriate for this particular eval failure."
+    )
+
+# -----------------------------------------------------
+
+
+@weave.op
 def interactive_column_selection(
     console: Console, columns: list[str], preselected: set[str]
 ) -> set[str]:
@@ -248,17 +333,17 @@ def interactive_column_selection(
 
     return simple_arrow_selection(console, columns, preselected)
 
-
+@weave.op
 def load_column_preferences(
-    config_file: str, entity_name: str, project_name: str
+    config_file: str, wandb_entity: str, wandb_project: str
 ) -> Optional[List[str]]:
     """
     Load column preferences for a specific project from config file.
 
     Args:
         config_file: Path to the config file
-        entity_name: Weave entity name
-        project_name: Weave project name
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
 
     Returns:
         List of column names if preferences exist, None otherwise
@@ -273,7 +358,7 @@ def load_column_preferences(
             config = yaml.safe_load(f)
 
         # Look for project-specific config
-        project_key = f"{entity_name}/{project_name}"
+        project_key = f"{wandb_entity}/{wandb_project}"
 
         if (
             config
@@ -288,17 +373,17 @@ def load_column_preferences(
         print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
         return None
 
-
+@weave.op
 def save_column_preferences(
-    config_file: str, entity_name: str, project_name: str, columns: List[str]
+    config_file: str, wandb_entity: str, wandb_project: str, columns: List[str]
 ) -> None:
     """
     Save column preferences for a specific project to config file.
 
     Args:
         config_file: Path to the config file
-        entity_name: Weave entity name
-        project_name: Weave project name
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
         columns: List of column names to save
     """
     config_path = Path(config_file)
@@ -319,7 +404,7 @@ def save_column_preferences(
             config = {}
 
     # Update with new preferences
-    project_key = f"{entity_name}/{project_name}"
+    project_key = f"{wandb_entity}/{wandb_project}"
     if project_key not in config:
         config[project_key] = {}
 
@@ -331,14 +416,15 @@ def save_column_preferences(
 
     print(f"[green]✓ Saved column preferences to {config_file}[/green]")
 
-
+@weave.op
 async def run_pipeline(
     eval_id: str,
     user_context: str,
     debug: bool,
     model: str,
-    api_key: str | None,
     config_file: str,
+    wandb_entity: str,
+    wandb_project: str,
     force_column_selection: bool = False,
 ):
     # Query Weave for evaluation data using the enhanced API
@@ -348,11 +434,8 @@ async def run_pipeline(
 
     # ----------------- Column Selection -----------------
 
-    entity_name = "wandb-applied-ai-team"
-    project_name = "eval-failures"
-
     # Check for saved column preferences
-    saved_columns = load_column_preferences(config_file, entity_name, project_name)
+    saved_columns = load_column_preferences(config_file, wandb_entity, wandb_project)
 
     if saved_columns and not force_column_selection:
         # Use saved preferences
@@ -362,8 +445,8 @@ async def run_pipeline(
         # Display the columns being used
         console.print(
             Panel(
-                f"[green]Using {len(selected_columns)} saved columns for {entity_name}/{project_name}[/green]\n\n"
-                "[dim]To re-select columns, use --force-column-selection[/dim]",
+                f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
+                "[dim]To re-select columns, re-run the script with --force-column-selection[/dim]",
                 title="📊 Column Configuration",
                 border_style="blue",
             )
@@ -415,8 +498,8 @@ async def run_pipeline(
         # Get available columns (with nested paths like inputs.field1, inputs.field2, etc.)
         column_info = get_available_columns(
             eval_id=eval_id,
-            entity_name=entity_name,
-            project_name=project_name,
+            wandb_entity=wandb_entity,
+            wandb_project=wandb_project,
             include_nested_paths=True,  # This expands objects to show their properties
             max_nesting_depth=4,  # Allow deeper nesting to see paths like inputs.self.transcript
         )
@@ -490,7 +573,7 @@ async def run_pipeline(
 
         # Save preferences
         save_column_preferences(
-            config_file, entity_name, project_name, list(selected_columns)
+            config_file, wandb_entity, wandb_project, list(selected_columns)
         )
 
         if debug:
@@ -515,8 +598,8 @@ async def run_pipeline(
 
     eval_data = query_evaluation_data(
         eval_id=eval_id,
-        entity_name=entity_name,
-        project_name=project_name,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
         columns=columns_for_query,  # Use the selected columns + display_name
         include_outputs=True,
         deep_ref_extraction=False,
@@ -557,38 +640,11 @@ async def run_pipeline(
         f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]"
     )
     for i, trace in enumerate(eval_data["children"][:3]):
-        if debug:
-            # Create a table for trace details
-            trace_table = Table(
-                title=f"Trace {i + 1} Details",
-                show_header=True,
-                header_style="bold magenta",
-            )
-            trace_table.add_column("Property", style="cyan", width=20)
-            trace_table.add_column("Value", style="white")
-
-            trace_table.add_row("ID", trace.get("id", "N/A"))
-            trace_table.add_row("Name", str(trace.get("display_name", "N/A")))
-            trace_table.add_row("Op Name", trace.get("op_name", "N/A"))
-            trace_table.add_row("Started At", trace.get("started_at", "N/A"))
-            trace_table.add_row("Ended At", trace.get("ended_at", "N/A"))
-            trace_table.add_row("Summary", "\n" + str(trace.get("summary", "N/A")))
-            trace_table.add_row("Input", "\n" + str(trace.get("inputs", {})))
-            if (
-                trace.get("output")
-                and isinstance(trace.get("output"), dict)
-                and "output" in trace["output"]
-            ):
-                trace_table.add_row("Output", "\n" + str(trace["output"]["output"]))
-
-            console.print(trace_table)
-
-            console.print("[dim]" + "─" * 50 + "[/dim]\n")
 
         # Extract data based on available columns
         trace_entry = {
             "id": trace.get("id"),
-            "input": trace.get("inputs", {}),
+            "inputs": trace.get("inputs", {}),
             "output": trace.get("output", {}),
             "scores": {},
         }
@@ -618,26 +674,54 @@ async def run_pipeline(
 
         trace_data.append(trace_entry)
 
+        if debug:
+            # Create a table for trace details
+            trace_table = Table(
+                title=f"Trace {i + 1} Details",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            trace_table.add_column("Property", style="cyan", width=20)
+            trace_table.add_column("Value", style="white")
+
+            trace_table.add_row("ID", trace_entry.get("id", "N/A"))
+            trace_table.add_row("Name", str(trace_entry.get("display_name", "N/A")))
+            trace_table.add_row("Op Name", trace_entry.get("op_name", "N/A"))
+            trace_table.add_row("Started At", trace_entry.get("started_at", "N/A"))
+            trace_table.add_row("Ended At", trace_entry.get("ended_at", "N/A"))
+            trace_table.add_row("Summary", "\n" + str(trace_entry.get("summary", "N/A")))
+            trace_table.add_row("Input", "\n" + str(trace_entry.get("inputs", {})))
+            
+            if (
+                trace_entry.get("output")
+                and isinstance(trace_entry.get("output"), dict)
+                and "output" in trace_entry["output"]
+            ):
+                trace_table.add_row("Output", "\n" + str(trace["output"]["output"]))
+            console.print(trace_table)
+            console.print("[dim]" + "─" * 50 + "[/dim]\n")
+
+
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
 
     # ----------------- STEP 1: Draft categorization -----------------
 
     console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
-
+    
+    @weave.op
     async def draft_categorization(
         trace_id: str,
         row_input: str,
         row_output: str,
         evaluation_evaluation_or_scorer_data: str,
         user_context: str,
-        api_key: str | None,
         model: str,
         debug: bool = False,
     ) -> FirstPassCategorizationResult:
         draft_categorization_llm = Agent(
             name="Row by Row",
             instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=api_key),
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
             output_type=FirstPassCategorization,
         )
         first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
@@ -662,51 +746,56 @@ async def run_pipeline(
                 )
             )
 
-        draft_categorization_result = await Runner.run(
+        draft_categorizations = await Runner.run(
             draft_categorization_llm,
             first_pass_categorization_prompt_str,
         )
+
         draft_categorization_result = FirstPassCategorizationResult(
             trace_id=trace_id,
-            thinking=draft_categorization_result.final_output.thinking,
-            notes=draft_categorization_result.final_output.notes,
-            candidate_task_failure_categories=draft_categorization_result.final_output.candidate_task_failure_categories,
+            thinking=draft_categorizations.final_output.thinking,
+            first_pass_categories=draft_categorizations.final_output.first_pass_categories,
         )
+
         return draft_categorization_result
 
-    # Create tasks with trace_id
-    tasks = [
-        draft_categorization(
-            trace_id=trace_entry["id"],
-            row_input=trace_entry["input"],
-            row_output=trace_entry["output"],
-            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
-            user_context=user_context,
-            api_key=api_key,
-            model=model,
-            debug=debug,
-        )
-        for trace_entry in trace_data
-    ]
+    @weave.op
+    async def run_draft_categorization(
+        trace_data: dict,
+        user_context: str,
+        model: str,
+        debug: bool = False,
+    ) -> list[FirstPassCategorizationResult]:
 
-    console.print("[yellow]⚡ Running categorization tasks...[/yellow]")
-    draft_categorization_results = await asyncio.gather(*tasks)
+        # Create tasks with trace_id
+        tasks = [
+            draft_categorization(
+                trace_id=trace_entry["id"],
+                row_input=trace_entry["inputs"],
+                row_output=trace_entry["output"],
+                evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+                user_context=user_context,
+                model=model,
+                debug=debug,
+            )
+            for trace_entry in trace_data
+        ]
+
+        console.print("[yellow]⚡ Running categorization tasks...[/yellow]")
+        draft_categorization_results = await asyncio.gather(*tasks)
+
+        return draft_categorization_results
+
+    draft_categorization_results = await run_draft_categorization(
+        trace_data=trace_data,
+        user_context=user_context,
+        model=model,
+        debug=debug,
+    )
+
     num_draft_categorizations = len(draft_categorization_results)
 
-    # Create string for clustering prompt (needed for the agent)
-    draft_categorization_results_str = ""
-
-    for draft_categorization_result in draft_categorization_results:
-        draft_categorization_results_str += (
-            f"### Trace ID: {draft_categorization_result.trace_id}\n\n"
-        )
-        draft_categorization_results_str += (
-            f"#### Notes\n\n{draft_categorization_result.notes}\n\n"
-        )
-        draft_categorization_results_str += f"#### Candidate Task Failure Categories\n\n{draft_categorization_result.candidate_task_failure_categories}\n"
-        draft_categorization_results_str += "\n" + "=" * 50 + "\n"
-
-    # Create a nice display for draft categorization results
+     # Create a nice display for draft categorization results
     console.print(
         Panel(
             f"[bold green]✅ Completed {num_draft_categorizations} draft categorizations[/bold green]",
@@ -715,27 +804,45 @@ async def run_pipeline(
         )
     )
 
-    for i, draft_categorization_result in enumerate(draft_categorization_results):
-        result_table = Table(show_header=False, box=None, padding=(0, 1))
-        result_table.add_column("", style="bold cyan", width=25)
-        result_table.add_column("", style="white")
-
-        result_table.add_row("Trace ID", draft_categorization_result.trace_id)
-        result_table.add_row("Notes", draft_categorization_result.notes)
-        result_table.add_row(
-            "Categories",
-            ", ".join(draft_categorization_result.candidate_task_failure_categories),
-        )
-
-        console.print(
-            Panel(
-                result_table, title=f"[bold]Result {i + 1}[/bold]", border_style="blue"
-            )
-        )
-
     # ----------------- STEP 2: Review categorizations -----------------
 
     console.print("\n[bold blue]🔍 STEP 2: Reviewing categorizations...[/bold blue]")
+
+    # Create resclustering prompt (needed for the agent)
+    draft_categorization_results_str = "\n" + "=" * 80 + "\n"
+
+    for c_i, draft_categorization_result in enumerate(draft_categorization_results):
+        draft_categorization_results_str += (
+            f"### Evaluation Trace ID: {draft_categorization_result.trace_id}\n\n"
+        )
+
+        if debug:
+            result_table = Table(show_header=True, box=None, padding=(0, 1))
+            result_table.add_column("Candidate Category", style="cyan", width=120)
+            result_table.add_column("Category Description", style="white", width=120)
+            result_table.add_column("Eval Failure Note", style="dim", width=120)
+
+        for i, first_pass_category in enumerate(draft_categorization_result.first_pass_categories):
+            draft_categorization_results_str += (
+                f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
+            )
+            draft_categorization_results_str += (
+                f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
+            )
+            draft_categorization_results_str += (
+                f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
+            )
+            if debug:
+                result_table.add_row(first_pass_category.category_name, first_pass_category.category_description, first_pass_category.eval_failure_note)
+        
+        draft_categorization_results_str += "\n" + "=" * 80 + "\n"
+
+        if debug:
+            console.print(
+                Panel(
+                    result_table, title=f"[green]Trace {c_i + 1}[/green]", border_style="green"
+                )
+            )
 
     clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
         num_traces=num_draft_categorizations
@@ -749,7 +856,7 @@ async def run_pipeline(
     review_categorizations_llm = Agent(
         name="Review Agent",
         instructions=clustering_system_prompt_str,
-        model=LitellmModel(model=model, api_key=api_key),
+        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
         output_type=ClusteringCategories,
     )
 
@@ -806,71 +913,7 @@ async def run_pipeline(
     # Run a final test categorization
     console.print("\n[bold blue]🧪 Running final test categorization...[/bold blue]")
 
-    CATEGORIZATION_REVIEW_SYSTEM_PROMPT = """
-You are a helpful assistant that categorizes task failure categories.
-
-Given a proposed list of evaluation failure categories and the eval failtures themselves, determine \
-if the proposed categories are appropriate.
-
-If the proposed categories are appropriate, return the proposed categories.
-
-If the proposed categories are not appropriate, return a new list of categories that are appropriate \
-as well as a note explaining why the proposed categories are not appropriate.
-"""
-
-    CATEGORIZATION_REVIEW_PROMPT = """
-Given the following user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output.
-
-## User Context
-
-<user_context>
-{user_context}
-</user_context>
-
-## Evaluation Failure Data
-
-### Inputs that were given to the system
-<row_input>
-{{row_input}}
-</row_input>
-
-### Outputs that were evaluated to be failures
-<row_output>
-{{row_output}}
-</row_output>
-
-### Evaluation or Scorer data and metadata
-
-<evaluation_evaluation_or_scorer_data>
-{{evaluation_evaluation_or_scorer_data}}
-</evaluation_evaluation_or_scorer_data>
-
-## Proposed list of available failure categories
-
-
-<proposed_failure_categories>
-{{proposed_failure_categories}}
-</proposed_failure_categories>
-
-Does the eval failure you can see above fall into any of the proposed failure categories?
-"""
-
-    class CategoryReview(BaseModel):
-        """A task failure category."""
-
-        thinking: str = Field(
-            description="A detailed reasoning process behind the selection of the category \
-    name, description and notes."
-        )
-        candidate_categories_appropriate: bool = Field(
-            description="Whether the proposed failure categories are appropriate for the eval failure."
-        )
-        new_category_proposal: str | None = Field(
-            description="If the proposed failure categories are not appropriate, return a new \
-    category that is appropriate for this particular eval failure."
-        )
-
+    @weave.op
     async def category_review(
         user_context: str,
         row_input: str,
@@ -881,7 +924,7 @@ Does the eval failure you can see above fall into any of the proposed failure ca
         category_review_llm = Agent(
             name="Final Classification",
             instructions=CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=api_key),
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
             output_type=CategoryReview,
         )
 
@@ -902,7 +945,7 @@ Does the eval failure you can see above fall into any of the proposed failure ca
     review_tasks = [
         category_review(
             user_context=user_context,
-            row_input=trace_entry["input"],
+            row_input=trace_entry["inputs"],
             row_output=trace_entry["output"],
             evaluation_evaluation_or_scorer_data=trace_entry["scores"],
             proposed_failure_categories=review_data["task_failure_categories"],
@@ -939,6 +982,7 @@ if __name__ == "__main__":
     # User AI System Context
     USER_AI_SYSTEM_CONTEXT = """My app is trying to idenify insights from transcripts of \
 meetings between prospects and our sales team."""
+
     USER_EVAL_CONTEXT = """To classify speaker IDs from a transcript into whether they \
 are from our company or are a customer/prospect."""
 
@@ -961,8 +1005,10 @@ What the user is trying to evaluate in their AI system:
 
 """
 
+    FAILURE_COLUMN = "output.scores.failure"
+    FAILURE_CONDITION = "output.scores.failure > 0.5"
+
     model = "gemini/gemini-2.5-pro"
-    api_key = os.getenv("GOOGLE_API_KEY")
 
     args: Args = simple_parsing.parse(Args)
 
@@ -971,14 +1017,17 @@ What the user is trying to evaluate in their AI system:
             "User context is required. Please provide a user context about the AI system and what they are trying to evaluate."
         )
 
+    weave.init(f"{args.wandb_logging_entity}/{args.wandb_logging_project}")
+
     asyncio.run(
         run_pipeline(
             eval_id=eval_id,
             user_context=user_context_str,
             debug=args.debug,
             model=model,
-            api_key=args.api_key,
             config_file=args.config_file,
             force_column_selection=args.force_column_selection,
+            wandb_entity=args.wandb_entity,
+            wandb_project=args.wandb_project,
         )
     )

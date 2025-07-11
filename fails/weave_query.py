@@ -8,7 +8,7 @@ import base64
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Union, Iterator
 from enum import Enum
-
+import weave
 import requests
 from dotenv import load_dotenv
 
@@ -28,8 +28,8 @@ class TraceDepth(Enum):
 class WeaveQueryConfig:
     """Configuration for Weave queries."""
 
-    entity_name: str
-    project_name: str
+    wandb_entity: str
+    wandb_project: str
     api_key: Optional[str] = None
     base_url: str = "https://trace.wandb.ai"
 
@@ -134,7 +134,7 @@ class WeaveQueryClient:
 
         # Build query with filters
         query = {
-            "project_id": f"{self.config.entity_name}/{self.config.project_name}",
+            "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
             "filters": {"op": "EqOperation", "field": "id", "value": call_id},
             "columns": columns,
             "limit": limit,
@@ -179,7 +179,7 @@ class WeaveQueryClient:
 
         # Query for calls where parent_id matches the evaluation
         query = {
-            "project_id": f"{self.config.entity_name}/{self.config.project_name}",
+            "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
             "filter": {
                 "parent_ids": [
                     evaluation_call_id
@@ -296,6 +296,7 @@ class WeaveQueryClient:
         _collect(obj)
         return list(refs)
 
+    @weave.op
     def extract_refs_from_traces(
         self, 
         traces: List[Dict[str, Any]],
@@ -499,7 +500,7 @@ class WeaveQueryClient:
         
         return updated_traces
 
-
+@weave.op
 def build_trace_hierarchy(
     evaluation: Dict[str, Any], all_traces: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -544,11 +545,11 @@ def build_trace_hierarchy(
     hierarchy["children"] = build_subtree(evaluation["id"])
     return hierarchy
 
-
+@weave.op
 def query_evaluation_trace_data(
     eval_id: str,
-    entity_name: str = "wandb-applied-ai-team",
-    project_name: str = "eval-failures",
+    wandb_entity: str,
+    wandb_project: str,
     columns: Optional[List[str]] = None,
     include_outputs: bool = True,
     trace_depth: Union[TraceDepth, bool, None] = TraceDepth.DIRECT_CHILDREN,
@@ -583,7 +584,7 @@ def query_evaluation_trace_data(
         )
 
     # Configuration
-    config = WeaveQueryConfig(entity_name=entity_name, project_name=project_name)
+    config = WeaveQueryConfig(wandb_entity=wandb_entity, wandb_project=wandb_project)
 
     # Create client
     client = WeaveQueryClient(config)
@@ -617,7 +618,7 @@ def query_evaluation_trace_data(
         query_kwargs["field"] = "trace_id"
         trace_results = client._execute_query(
             {
-                "project_id": f"{entity_name}/{project_name}",
+                "project_id": f"{wandb_entity}/{wandb_project}",
                 "filters": {"op": "EqOperation", "field": "trace_id", "value": eval_id},
                 "columns": columns,
                 "limit": limit
@@ -787,11 +788,11 @@ def query_evaluation_trace_data(
 
     return result
 
-
+@weave.op
 def query_evaluation_data(
     eval_id: str,
-    entity_name: str = "",
-    project_name: str = "",
+    wandb_entity: str,
+    wandb_project: str,
     columns: Optional[List[str]] = None,
     include_outputs: bool = True,
     trace_depth: Union[TraceDepth, bool, None] = TraceDepth.DIRECT_CHILDREN,
@@ -822,8 +823,8 @@ def query_evaluation_data(
               their resolved values
     """
 
-    if entity_name == "" or project_name == "":
-        raise ValueError("entity_name and project_name must be set")
+    if wandb_entity == "" or wandb_project == "":
+        raise ValueError("wandb_entity and wandb_project must be set")
     
     # Ensure we include the necessary columns for ref extraction
     if columns is None:
@@ -852,8 +853,8 @@ def query_evaluation_data(
     # Get base evaluation data
     result = query_evaluation_trace_data(
         eval_id=eval_id,
-        entity_name=entity_name,
-        project_name=project_name,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
         columns=columns,
         include_outputs=include_outputs,
         trace_depth=trace_depth,
@@ -870,7 +871,7 @@ def query_evaluation_data(
         all_traces = [result["evaluation"]] + result["all_descendants"]
     
     # Get the client instance we used
-    config = WeaveQueryConfig(entity_name=entity_name, project_name=project_name)
+    config = WeaveQueryConfig(wandb_entity=wandb_entity, wandb_project=wandb_project)
     client = WeaveQueryClient(config)
     
     # Extract refs
@@ -963,8 +964,8 @@ def query_evaluation_data(
 
 def get_available_columns(
     eval_id: str,
-    entity_name: str = "",
-    project_name: str = "",
+    wandb_entity: str,
+    wandb_project: str,
     include_nested_paths: bool = True,
     max_nesting_depth: int = 3,
 ) -> Dict[str, Any]:
@@ -977,8 +978,8 @@ def get_available_columns(
     
     Args:
         eval_id: The evaluation ID
-        entity_name: Weave entity name
-        project_name: Weave project name
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
         include_nested_paths: If True, also return nested paths like "inputs.model"
         
     Returns:
@@ -988,11 +989,11 @@ def get_available_columns(
         - all_columns: Flat list of all column names including nested paths
         - sample_trace: The sample child trace used for discovery
     """
-    if entity_name == "" or project_name == "":
-        raise ValueError("entity_name and project_name must be set")
+    if wandb_entity == "" or wandb_project == "":
+        raise ValueError("wandb_entity and wandb_project must be set")
     
     # Configuration
-    config = WeaveQueryConfig(entity_name=entity_name, project_name=project_name)
+    config = WeaveQueryConfig(wandb_entity=wandb_entity, wandb_project=wandb_project)
     client = WeaveQueryClient(config)
     
     # First, find the evaluation trace
@@ -1021,7 +1022,7 @@ def get_available_columns(
     # Query ONE child trace with NO column filtering to get all available columns
     # We don't specify columns parameter, so the API returns everything
     query = {
-        "project_id": f"{entity_name}/{project_name}",
+        "project_id": f"{wandb_entity}/{wandb_project}",
         "filter": {
             "parent_ids": [eval_trace["id"]]
         },
