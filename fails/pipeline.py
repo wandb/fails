@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+from asyncio import Semaphore
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,18 +23,18 @@ from rich.table import Table
 from fails.cli.arrow_selector import simple_arrow_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
-    FIRST_PASS_CATEGORIZATION_PROMPT,
-    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
     CLUSTERING_PROMPT,
     CLUSTERING_SYSTEM_PROMPT,
     FINAL_CLASSIFICATION_PROMPT,
     FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-    FirstPassCategorizationResult,
-    FirstPassCategorization,
-    FinalClassification,
-    FinalClassificationResult,
+    FIRST_PASS_CATEGORIZATION_PROMPT,
+    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
     Category,
     ClusteringCategories,
+    FinalClassification,
+    FinalClassificationResult,
+    FirstPassCategorization,
+    FirstPassCategorizationResult,
     PipelineResult,
 )
 from fails.utils import (
@@ -75,6 +76,7 @@ class Args:
     wandb_logging_entity: str = "wandb-applied-ai-team"
     wandb_logging_project: str = "eval-failures-testing"
     n_samples: int | None = None
+    max_concurrent_llm_calls: int = 100  # Control concurrent LLM API calls
 
 
 @weave.op
@@ -99,6 +101,7 @@ def interactive_column_selection(
         sys.path.insert(0, parent_dir)
 
     return simple_arrow_selection(console, columns, preselected)
+
 
 @weave.op
 def load_column_preferences(
@@ -139,6 +142,7 @@ def load_column_preferences(
     except (yaml.YAMLError, KeyError) as e:
         print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
         return None
+
 
 @weave.op
 def save_column_preferences(
@@ -183,6 +187,7 @@ def save_column_preferences(
 
     print(f"[green]✓ Saved column preferences to {config_file}[/green]")
 
+
 @weave.op
 def load_failure_column_preferences(
     config_file: str, wandb_entity: str, wandb_project: str
@@ -218,7 +223,7 @@ def load_failure_column_preferences(
         ):
             return {
                 "failure_column": config[project_key]["failure_column"],
-                "failure_value": config[project_key]["failure_value"]
+                "failure_value": config[project_key]["failure_value"],
             }
 
         return None
@@ -227,13 +232,14 @@ def load_failure_column_preferences(
         print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
         return None
 
+
 @weave.op
 def save_failure_column_preferences(
-    config_file: str, 
-    wandb_entity: str, 
-    wandb_project: str, 
+    config_file: str,
+    wandb_entity: str,
+    wandb_project: str,
     failure_column: str,
-    failure_value: bool
+    failure_value: bool,
 ) -> None:
     """
     Save failure column preferences for a specific project to config file.
@@ -276,6 +282,7 @@ def save_failure_column_preferences(
 
     print(f"[green]✓ Saved failure column preferences to {config_file}[/green]")
 
+
 @weave.op
 def get_column_preferences(
     config_file: str,
@@ -305,7 +312,7 @@ def get_column_preferences(
     """
     # First, handle failure column selection
     console.print("\n[bold blue]🔍 Failure Column Configuration[/bold blue]")
-    
+
     # Get all available columns first
     column_info = get_available_columns(
         eval_id=eval_id,
@@ -315,11 +322,13 @@ def get_column_preferences(
         max_nesting_depth=4,
     )
     all_columns = column_info["all_columns"]
-    
+
     # Check for saved failure column preferences
-    saved_failure_config = load_failure_column_preferences(config_file, wandb_entity, wandb_project)
+    saved_failure_config = load_failure_column_preferences(
+        config_file, wandb_entity, wandb_project
+    )
     failure_config = None
-    
+
     if saved_failure_config and not force_column_selection:
         # Use saved failure column preferences
         console.print(
@@ -338,29 +347,34 @@ def get_column_preferences(
     else:
         # Perform failure column selection
         if saved_failure_config and force_column_selection:
-            console.print("[yellow]Force selection enabled - overriding saved failure column[/yellow]")
+            console.print(
+                "[yellow]Force selection enabled - overriding saved failure column[/yellow]"
+            )
         else:
             console.print("[yellow]No saved failure column preferences found[/yellow]")
-        
+
         # Interactive failure column selection
-        failure_column, failure_value = interactive_failure_column_selection(console, all_columns)
-        
+        failure_column, failure_value = interactive_failure_column_selection(
+            console, all_columns
+        )
+
         if failure_column and failure_value is not None:
             # Validate that the selected column exists and is boolean
             # We'll check this when we query the data
             failure_config = {
                 "failure_column": failure_column,
-                "failure_value": failure_value
+                "failure_value": failure_value,
             }
-            
+
             # Save the failure column preferences
             save_failure_column_preferences(
-                config_file, wandb_entity, wandb_project, 
-                failure_column, failure_value
+                config_file, wandb_entity, wandb_project, failure_column, failure_value
             )
         else:
-            console.print("[yellow]No failure column selected - will process all traces[/yellow]")
-    
+            console.print(
+                "[yellow]No failure column selected - will process all traces[/yellow]"
+            )
+
     # Now handle regular column selection
     saved_columns = load_column_preferences(config_file, wandb_entity, wandb_project)
 
@@ -384,7 +398,7 @@ def get_column_preferences(
         # Build the column display content
         column_content = f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
         column_content += "[dim]To re-select columns, re-run the script with --force-column-selection[/dim]\n"
-        
+
         # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
             cols = grouped[prefix]
@@ -395,7 +409,9 @@ def get_column_preferences(
                 column_content += f"  ... and {len(cols) - 3} more\n"
 
         if other_cols:
-            column_content += f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
+            column_content += (
+                f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
+            )
             for col in other_cols:
                 column_content += f"  • {col}\n"
 
@@ -454,7 +470,9 @@ def get_column_preferences(
             and not col.startswith("summary.")
             and col not in metadata_columns
             and col not in exclude_top_level  # Exclude top-level objects
-            and not any(part.startswith('_') for part in col.split('.'))  # Exclude underscore-prefixed keys
+            and not any(
+                part.startswith("_") for part in col.split(".")
+            )  # Exclude underscore-prefixed keys
         ]
 
         # For "other" group, only keep specific columns
@@ -503,11 +521,11 @@ def get_column_preferences(
     columns_for_query = list(selected_columns)
     if "display_name" not in columns_for_query:
         columns_for_query.append("display_name")
-    
+
     # Always include the failure column if one was selected
     if failure_config and failure_config["failure_column"] not in columns_for_query:
         columns_for_query.append(failure_config["failure_column"])
-        
+
     return failure_config, columns_for_query
 
 
@@ -523,8 +541,10 @@ def construct_first_pass_categorization_prompt(
     if isinstance(row_output, dict):
         row_output = json.dumps(row_output, indent=2)
     if isinstance(evaluation_evaluation_or_scorer_data, dict):
-        evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
-        
+        evaluation_evaluation_or_scorer_data = json.dumps(
+            evaluation_evaluation_or_scorer_data, indent=2
+        )
+
     first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
         user_context=user_context,
         row_input=row_input,
@@ -532,6 +552,7 @@ def construct_first_pass_categorization_prompt(
         evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
     )
     return first_pass_categorization_prompt_str
+
 
 @weave.op
 async def draft_categorization(
@@ -541,27 +562,29 @@ async def draft_categorization(
     evaluation_evaluation_or_scorer_data: str | dict,
     user_context: str,
     model: str,
+    max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> FirstPassCategorizationResult:
-    
-    draft_categorization_llm = Agent(
-        name="Row by Row",
-        instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-        output_type=FirstPassCategorization,
-    )
-    
-    first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
-        user_context=user_context,
-        row_input=row_input,
-        row_output=row_output,
-        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-    )
+    llm_semaphore = Semaphore(max_concurrent_llm_calls)
+    async with llm_semaphore:
+        draft_categorization_llm = Agent(
+            name="Row by Row",
+            instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            output_type=FirstPassCategorization,
+        )
 
-    draft_categorizations = await Runner.run(
-        draft_categorization_llm,
-        first_pass_categorization_prompt_str,
-    )
+        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
+            user_context=user_context,
+            row_input=row_input,
+            row_output=row_output,
+            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        )
+
+        draft_categorizations = await Runner.run(
+            draft_categorization_llm,
+            first_pass_categorization_prompt_str,
+        )
 
     draft_categorization_result = FirstPassCategorizationResult(
         trace_id=trace_id,
@@ -571,14 +594,15 @@ async def draft_categorization(
 
     return draft_categorization_result
 
+
 @weave.op
 async def run_draft_categorization(
     trace_data: dict,
     user_context: str,
     model: str,
+    max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> list[FirstPassCategorizationResult]:
-
     # Create tasks with trace_id
     tasks = [
         draft_categorization(
@@ -589,6 +613,7 @@ async def run_draft_categorization(
             user_context=user_context,
             model=model,
             debug=debug,
+            max_concurrent_llm_calls=max_concurrent_llm_calls,
         )
         for trace_entry in trace_data
     ]
@@ -597,6 +622,7 @@ async def run_draft_categorization(
 
     return draft_categorization_results
 
+
 def construct_final_classification_prompt(
     row_input: str | dict,
     row_output: str | dict,
@@ -604,14 +630,15 @@ def construct_final_classification_prompt(
     user_context: str,
     available_categories_str: str,
 ) -> str:
-    
     # Convert dictionaries to JSON strings if needed
     if isinstance(row_input, dict):
         row_input = json.dumps(row_input, indent=2)
     if isinstance(row_output, dict):
         row_output = json.dumps(row_output, indent=2)
     if isinstance(evaluation_evaluation_or_scorer_data, dict):
-        evaluation_evaluation_or_scorer_data = json.dumps(evaluation_evaluation_or_scorer_data, indent=2)
+        evaluation_evaluation_or_scorer_data = json.dumps(
+            evaluation_evaluation_or_scorer_data, indent=2
+        )
 
     final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
         user_context=user_context,
@@ -622,6 +649,7 @@ def construct_final_classification_prompt(
     )
     return final_classification_prompt_str
 
+
 @weave.op
 async def final_classification(
     trace_id: str,
@@ -631,26 +659,28 @@ async def final_classification(
     user_context: str,
     available_categories_str: str,
     model: str,
+    max_concurrent_llm_calls: int,
 ) -> FinalClassificationResult:
-    
-    final_classification_llm = Agent(
-        name="Final Classification",
-        instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-        output_type=FinalClassification,
-    )
+    llm_semaphore = Semaphore(max_concurrent_llm_calls)
+    async with llm_semaphore:
+        final_classification_llm = Agent(
+            name="Final Classification",
+            instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            output_type=FinalClassification,
+        )
 
-    final_classification_prompt_str = construct_final_classification_prompt(
-        row_input=row_input,
-        row_output=row_output,
-        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-        user_context=user_context,
-        available_categories_str=available_categories_str,
-    )
+        final_classification_prompt_str = construct_final_classification_prompt(
+            row_input=row_input,
+            row_output=row_output,
+            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+            user_context=user_context,
+            available_categories_str=available_categories_str,
+        )
 
-    classification_result = await Runner.run(
-        final_classification_llm, final_classification_prompt_str
-    )
+        classification_result = await Runner.run(
+            final_classification_llm, final_classification_prompt_str
+        )
 
     # Add the trace_id to the classification result
     final_classification_result = FinalClassificationResult(
@@ -662,15 +692,16 @@ async def final_classification(
 
     return final_classification_result
 
+
 @weave.op
 async def run_final_classification(
     trace_data: list[dict],
     user_context: str,
     available_categories_str: str,
     model: str,
+    max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> list[FinalClassificationResult]:
-    
     classification_tasks = [
         final_classification(
             trace_id=trace_entry["id"],
@@ -680,6 +711,7 @@ async def run_final_classification(
             user_context=user_context,
             available_categories_str=available_categories_str,
             model=model,
+            max_concurrent_llm_calls=max_concurrent_llm_calls,
         )
         for trace_entry in trace_data
     ]
@@ -699,35 +731,38 @@ def construct_clustering_prompt(
     )
     return clustering_prompt_str
 
+
 @weave.op
 async def aggregate_categorizations(
     draft_categorization_results_str: str,
     num_draft_categorizations: int,
     user_context: str,
     model: str,
+    max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> ClusteringCategories:
+    llm_semaphore = Semaphore(max_concurrent_llm_calls)
+    async with llm_semaphore:  # Control concurrent LLM calls
+        clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
+            num_traces=num_draft_categorizations
+        )
 
-    clustering_system_prompt_str = CLUSTERING_SYSTEM_PROMPT.format(
-        num_traces=num_draft_categorizations
-    )
+        clustering_prompt_str = construct_clustering_prompt(
+            draft_categorizations_and_notes=draft_categorization_results_str,
+            num_traces=num_draft_categorizations,
+        )
 
-    clustering_prompt_str = construct_clustering_prompt(
-        draft_categorizations_and_notes=draft_categorization_results_str,
-        num_traces=num_draft_categorizations,
-    )
+        review_categorizations_llm = Agent(
+            name="Review Agent",
+            instructions=clustering_system_prompt_str,
+            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            output_type=ClusteringCategories,
+        )
 
-    review_categorizations_llm = Agent(
-        name="Review Agent",
-        instructions=clustering_system_prompt_str,
-        model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
-        output_type=ClusteringCategories,
-    )
-
-    review_result = await Runner.run(
-        review_categorizations_llm,
-        clustering_prompt_str,
-    )
+        review_result = await Runner.run(
+            review_categorizations_llm,
+            clustering_prompt_str,
+        )
 
     return review_result.final_output
 
@@ -737,18 +772,23 @@ async def run_pipeline(
     trace_data: list[dict],
     user_context: str,
     model: str,
+    max_concurrent_llm_calls: int,
     debug: bool = False,
     console: Console = Console(),
 ) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
-    console.print(f"[bold blue]📝 STEP 1: Starting draft categorization for {len(trace_data)} traces[/bold blue]")
+    console.print(
+        f"[bold blue]📝 STEP 1: Starting draft categorization for {len(trace_data)} traces[/bold blue]"
+    )
 
     if debug:
-        first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
-            row_input=trace_data[0]["inputs"],
-            row_output=trace_data[0]["output"],
-            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
-            user_context=user_context,
+        first_pass_categorization_prompt_str = (
+            construct_first_pass_categorization_prompt(
+                row_input=trace_data[0]["inputs"],
+                row_output=trace_data[0]["output"],
+                evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+                user_context=user_context,
+            )
         )
         console.print(
             Panel(
@@ -771,6 +811,7 @@ async def run_pipeline(
         trace_data=trace_data,
         user_context=user_context,
         model=model,
+        max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
     )
 
@@ -793,9 +834,7 @@ async def run_pipeline(
     draft_categorization_results_str = "\n" + "=" * 80 + "\n"
 
     for c_i, draft_categorization_result in enumerate(draft_categorization_results):
-        draft_categorization_results_str += (
-            f"### Evaluation Trace ID:\nTrace ID: {draft_categorization_result.trace_id}\n\n"
-        )
+        draft_categorization_results_str += f"### Evaluation Trace ID:\nTrace ID: {draft_categorization_result.trace_id}\n\n"
 
         if debug:
             result_table = Table(show_header=True, box=None, padding=(0, 1))
@@ -803,25 +842,27 @@ async def run_pipeline(
             result_table.add_column("Category Description", style="white", width=120)
             result_table.add_column("Eval Failure Note", style="dim", width=120)
 
-        for i, first_pass_category in enumerate(draft_categorization_result.first_pass_categories):
-            draft_categorization_results_str += (
-                f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
-            )
-            draft_categorization_results_str += (
-                f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
-            )
-            draft_categorization_results_str += (
-                f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
-            )
+        for i, first_pass_category in enumerate(
+            draft_categorization_result.first_pass_categories
+        ):
+            draft_categorization_results_str += f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
+            draft_categorization_results_str += f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
+            draft_categorization_results_str += f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
             if debug:
-                result_table.add_row(first_pass_category.category_name, first_pass_category.category_description, first_pass_category.eval_failure_note)
-        
+                result_table.add_row(
+                    first_pass_category.category_name,
+                    first_pass_category.category_description,
+                    first_pass_category.eval_failure_note,
+                )
+
         draft_categorization_results_str += "\n" + "=" * 80 + "\n"
 
         if debug:
             console.print(
                 Panel(
-                    result_table, title=f"[green]Trace {c_i + 1}[/green]", border_style="green"
+                    result_table,
+                    title=f"[green]Trace {c_i + 1}[/green]",
+                    border_style="green",
                 )
             )
 
@@ -840,8 +881,8 @@ async def run_pipeline(
         )
         console.print(
             Panel(
-                clustering_prompt_str, 
-                title="💭 Clustering Prompt", 
+                clustering_prompt_str,
+                title="💭 Clustering Prompt",
                 border_style="blue",
                 padding=(1, 2),
             )
@@ -853,9 +894,10 @@ async def run_pipeline(
         user_context=user_context,
         model=model,
         debug=debug,
+        max_concurrent_llm_calls=max_concurrent_llm_calls,
     )
 
-                        # Pretty print the review result
+    # Pretty print the review result
     console.print(
         Panel(
             "[bold green]✨ Review completed successfully![/bold green]",
@@ -875,10 +917,11 @@ async def run_pipeline(
         console.print(f"Notes: {category.failure_category_notes}")
         console.print("-" * 80)
 
-
     # ----------------- STEP 3: Final classification -----------------
 
-    console.print("\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]")
+    console.print(
+        "\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]"
+    )
 
     # Add "other" category to the list
     all_categories = review_data.task_failure_categories + [
@@ -886,7 +929,7 @@ async def run_pipeline(
             thinking="This is the default category for failures that don't fit into any other category",
             failure_category_name="other",
             failure_category_definition="Can be used if the evaluation failure sample can't be classified into one of the other classes",
-            failure_category_notes="Default category for unclassifiable failures"
+            failure_category_notes="Default category for unclassifiable failures",
         )
     ]
 
@@ -927,14 +970,14 @@ async def run_pipeline(
         user_context=user_context,
         available_categories_str=categories_str,
         model=model,
+        max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
     )
 
     return PipelineResult(
         failure_categories=all_categories,
-        classifications=classification_results_per_trace
+        classifications=classification_results_per_trace,
     )
-
 
 
 @weave.op
@@ -943,6 +986,7 @@ async def run_extract_and_classify_pipeline(
     user_context: str,
     debug: bool,
     model: str,
+    max_concurrent_llm_calls: int,
     config_file_path: str,
     wandb_entity: str,
     wandb_project: str,
@@ -960,7 +1004,7 @@ async def run_extract_and_classify_pipeline(
         )
         model = "gemini/gemini-2.5-flash"
         n_samples = 3 if n_samples is None else n_samples
-    
+
     # Display user context in a nice yellow box
     console.print(
         Panel(
@@ -994,9 +1038,11 @@ async def run_extract_and_classify_pipeline(
         trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
         include_hierarchy=True,
         limit=n_samples,
-        filter_dict={failure_config["failure_column"]: failure_config["failure_value"]} if failure_config else None,
+        filter_dict={failure_config["failure_column"]: failure_config["failure_value"]}
+        if failure_config
+        else None,
     )
-    
+
     # ----------------- Data Processing -----------------
     # Filter the evaluation data to only include selected columns
     eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
@@ -1009,7 +1055,9 @@ async def run_extract_and_classify_pipeline(
         validate_failure_column(eval_data, failure_config, console)
 
     # Prepare trace data for pipeline
-    trace_data = prepare_trace_data_for_pipeline(eval_data, debug, console, n_samples=n_samples)
+    trace_data = prepare_trace_data_for_pipeline(
+        eval_data, debug, console, n_samples=n_samples
+    )
 
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
 
@@ -1018,6 +1066,7 @@ async def run_extract_and_classify_pipeline(
         trace_data=trace_data,
         user_context=user_context,
         model=model,
+        max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
         console=console,
     )
@@ -1027,18 +1076,18 @@ async def run_extract_and_classify_pipeline(
     # ----------------- Generate Evaluation Report -----------------
 
     console.print("\n[bold blue]📊 STEP 4: Generating evaluation report...[/bold blue]")
-    
+
     report = generate_evaluation_report(
         final_classification_results=final_classification_results,
         all_categories=all_categories,
-        eval_name=eval_data["evaluation"].get("display_name", eval_id)
+        eval_name=eval_data["evaluation"].get("display_name", eval_id),
     )
-    
+
     # Display the report
     console.print("\n" + "=" * 80)
     console.print(report)
     console.print("=" * 80)
-    
+
     console.print("\n[bold green]✅ Pipeline completed successfully![/bold green]")
 
     pipeline_result.report = report
@@ -1046,7 +1095,7 @@ async def run_extract_and_classify_pipeline(
     if debug:
         console.print(
             Panel(
-                pipeline_result.model_dump_json(indent=4), 
+                pipeline_result.model_dump_json(indent=4),
                 title="Full Pipeline Result (debug mode)",
                 border_style="blue",
                 padding=(1, 1),
@@ -1054,7 +1103,6 @@ async def run_extract_and_classify_pipeline(
         )
 
     return pipeline_result
-
 
 
 if __name__ == "__main__":
@@ -1105,6 +1153,7 @@ What the user is trying to evaluate in their AI system:
             user_context=user_context_str,
             debug=args.debug,
             model=model,
+            max_concurrent_llm_calls=args.max_concurrent_llm_calls,
             config_file_path=args.config_file,
             force_column_selection=args.force_column_selection,
             wandb_entity=args.wandb_entity,
