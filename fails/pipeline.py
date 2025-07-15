@@ -74,6 +74,7 @@ class Args:
     wandb_project: str = "eval-failures"
     wandb_logging_entity: str = "wandb-applied-ai-team"
     wandb_logging_project: str = "eval-failures-testing"
+    n_samples: int | None = None
 
 
 @weave.op
@@ -739,7 +740,7 @@ async def run_pipeline(
     console: Console = Console(),
 ) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
-    console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
+    console.print(f"[bold blue]📝 STEP 1: Starting draft categorization for {len(trace_data)} traces[/bold blue]")
 
     if debug:
         first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
@@ -945,6 +946,7 @@ async def run_extract_and_classify_pipeline(
     wandb_entity: str,
     wandb_project: str,
     force_column_selection: bool = False,
+    n_samples: int | None = None,
 ) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
@@ -956,9 +958,7 @@ async def run_extract_and_classify_pipeline(
             f"[bold red]🔍 DEBUG MODE ENABLED, switching to {model}[/bold red]"
         )
         model = "gemini/gemini-2.5-flash"
-        N_FIRST_PASS_TRACES = 3
-    else:
-        N_FIRST_PASS_TRACES = None
+        n_samples = 3 if n_samples is None else n_samples
     
     # Display user context in a nice yellow box
     console.print(
@@ -992,7 +992,7 @@ async def run_extract_and_classify_pipeline(
         deep_ref_extraction=False,
         trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
         include_hierarchy=True,
-        limit=N_FIRST_PASS_TRACES,
+        limit=n_samples,
         filter_dict={failure_config["failure_column"]: failure_config["failure_value"]} if failure_config else None,
     )
     
@@ -1008,7 +1008,7 @@ async def run_extract_and_classify_pipeline(
         validate_failure_column(eval_data, failure_config, console)
 
     # Prepare trace data for pipeline
-    trace_data = prepare_trace_data_for_pipeline(eval_data, debug, console, sample_size=3)
+    trace_data = prepare_trace_data_for_pipeline(eval_data, debug, console, n_samples=n_samples)
 
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
 
@@ -1108,5 +1108,6 @@ What the user is trying to evaluate in their AI system:
             force_column_selection=args.force_column_selection,
             wandb_entity=args.wandb_entity,
             wandb_project=args.wandb_project,
+            n_samples=args.n_samples,
         )
     )

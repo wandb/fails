@@ -11,11 +11,14 @@ from enum import Enum
 import weave
 import requests
 from dotenv import load_dotenv
+from rich.console import Console
 
 from fails.utils import filter_trace_data_by_columns
 
 # Load environment variables from .env file
 load_dotenv()
+
+console = Console()
 
 
 class TraceDepth(Enum):
@@ -148,7 +151,7 @@ class WeaveQueryClient:
             raise
 
     def query_by_call_id(
-        self, call_id: str, columns: Optional[List[str]] = None, limit: int = 1000
+        self, call_id: str, columns: Optional[List[str]] = None, limit: int | None = None
     ) -> List[Dict[str, Any]]:
         """
         Query Weave traces by call ID.
@@ -182,8 +185,10 @@ class WeaveQueryClient:
             "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
             "filters": {"op": "EqOperation", "field": "id", "value": call_id},
             "columns": columns,
-            "limit": limit,
         }
+
+        if limit is not None:
+            query["limit"] = limit
 
         return self._execute_query(query)
 
@@ -191,7 +196,7 @@ class WeaveQueryClient:
         self,
         evaluation_call_id: str,
         columns: Optional[List[str]] = None,
-        limit: int = 1000,
+        limit: int | None = None,
         filter_dict: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -258,9 +263,11 @@ class WeaveQueryClient:
             "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
             "filter": query_filter if filter_dict else base_filter,
             "columns": columns,
-            "limit": limit,
             "sort_by": [{"field": "started_at", "direction": "asc"}],
         }
+
+        if limit is not None:
+            query["limit"] = limit
 
         return self._execute_query(query)
 
@@ -633,7 +640,7 @@ def query_evaluation_trace_data(
     include_outputs: bool = True,
     trace_depth: Union[TraceDepth, bool, None] = TraceDepth.DIRECT_CHILDREN,
     include_hierarchy: bool = True,
-    limit: int | None = 1000,
+    limit: int | None = None,
     filter_dict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
@@ -693,26 +700,9 @@ def query_evaluation_trace_data(
         query_kwargs["limit"] = limit
 
     evaluation_traces = client.query_by_call_id(**query_kwargs)
-
     if not evaluation_traces:
-        # If no exact match, try querying by trace_id to find all traces in this evaluation
-        query_kwargs["field"] = "trace_id"
-        trace_results = client._execute_query(
-            {
-                "project_id": f"{wandb_entity}/{wandb_project}",
-                "filters": {"op": "EqOperation", "field": "trace_id", "value": eval_id},
-                "columns": columns,
-                "limit": limit
-                if limit is not None
-                else 10000000,  # basically no limit by default
-                "sort_by": [{"field": "started_at", "direction": "asc"}],
-            }
-        )
-
-        if trace_results:
-            evaluation_traces = trace_results
-        else:
-            raise ValueError(f"No evaluation found with ID: {eval_id}")
+        console.print(f"[red]No evaluation found with ID: {eval_id}[/red]")
+        raise ValueError(f"No evaluation found with ID: {eval_id}")
 
     # Find the actual evaluation trace (root trace with parent_id=None)
     eval_trace = None
@@ -882,7 +872,7 @@ def query_evaluation_data(
     include_outputs: bool = True,
     trace_depth: Union[TraceDepth, bool, None] = TraceDepth.DIRECT_CHILDREN,
     include_hierarchy: bool = True,
-    limit: int | None = 1000,
+    limit: int | None = None,
     resolve_refs: bool = True,
     replace_refs: bool = True,
     deep_ref_extraction: bool = False,

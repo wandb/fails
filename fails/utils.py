@@ -94,7 +94,7 @@ def prepare_trace_data_for_pipeline(
     eval_data: Dict[str, Any],
     debug: bool,
     console: Console,
-    sample_size: int = 3
+    n_samples: int | None = None
 ) -> List[Dict[str, Any]]:
     """
     Prepare trace data from evaluation data for pipeline processing.
@@ -103,7 +103,6 @@ def prepare_trace_data_for_pipeline(
         eval_data: The evaluation data dictionary
         debug: Whether to display debug information
         console: Rich console for output
-        sample_size: Number of traces to sample for processing
         
     Returns:
         List of trace entries formatted for the pipeline
@@ -112,16 +111,21 @@ def prepare_trace_data_for_pipeline(
     
     # Display child trace information
     if eval_data.get("children"):
+        if n_samples:
+            eval_data["children"] = eval_data["children"][:n_samples]
+
         console.print(
             f"[dim]First child keys:[/dim] {', '.join(eval_data['children'][0].keys())}\n"
         )
         
-        console.print("\n[dim]CHILDREN:[/dim]")
-        console.print(
-            f"[dim]{len(eval_data['children'])} children found, sampling first {sample_size}:[/dim]\n"
-        )
+        if debug:
+            console.print("\n[dim]CHILDREN:[/dim]")
+            console.print(
+                f"[dim]{len(eval_data['children'])} children found, sampling first {n_samples}:[/dim]\n"
+            )
+            eval_data["children"] = eval_data["children"][:n_samples]
         
-        for i, trace in enumerate(eval_data["children"][:sample_size]):
+        for i, trace in enumerate(eval_data["children"]):
             # Format trace entry for pipeline
             trace_entry = {
                 "id": trace.get("id"),
@@ -135,6 +139,9 @@ def prepare_trace_data_for_pipeline(
             # Display debug information for first trace
             if debug and i == 0:
                 display_trace_debug_info(trace, trace_entry, i, console)
+    else:
+        console.print(f"[red]No children found in eval_data[/red]")
+        raise ValueError("No children found in eval_data")
     
     return trace_data
 
