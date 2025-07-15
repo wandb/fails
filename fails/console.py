@@ -24,7 +24,7 @@ def get_logger(name: str) -> logging.Logger:
     }
     
     # Get log level from environment or default to INFO
-    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
     level = level_map.get(log_level, logging.INFO)  # Default to INFO if invalid level
 
     # Configure rich console with custom theme
