@@ -6,11 +6,13 @@ import os
 import json
 import base64
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Union, Iterator
+from typing import List, Dict, Any, Optional, Union
 from enum import Enum
 import weave
 import requests
 from dotenv import load_dotenv
+
+from fails.utils import filter_trace_data_by_columns
 
 # Load environment variables from .env file
 load_dotenv()
@@ -1067,7 +1069,6 @@ def filter_evaluation_data_columns(
     Returns:
         The filtered evaluation data dictionary
     """
-    from fails.utils import filter_trace_data_by_columns
     
     # Create a copy to avoid modifying the original
     filtered_data = eval_data.copy()

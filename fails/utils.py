@@ -301,21 +301,20 @@ def generate_evaluation_report(
     total_failures = len(final_classification_results)
 
     for result in final_classification_results:
-        category = result.selected_category
+        category = result.failure_category
         if category not in classification_summary:
             classification_summary[category] = {"traces": [], "category_info": None}
         classification_summary[category]["traces"].append(
             {
                 "trace_id": result.trace_id,
-                "confidence": result.confidence_score,
-                "notes": result.classification_notes,
+                "notes": result.categorization_reason,
             }
         )
 
     # Get category info from all_categories
     for category in all_categories:
-        if category.category_name in classification_summary:
-            classification_summary[category.category_name]["category_info"] = category
+        if category.failure_category_name in classification_summary:
+            classification_summary[category.failure_category_name]["category_info"] = category
 
     # Sort categories by count (descending)
     sorted_categories = sorted(
@@ -364,7 +363,7 @@ def generate_evaluation_report(
         report += f"Count: {count} ({percentage:.1f}% of failures)\n\n"
 
         if category_info:
-            report += f"{category_info.category_description}\n\n"
+            report += f"{category_info.failure_category_definition}\n\n"
 
         # Add examples section only if there are notes to show
         has_examples = any(trace["notes"] for trace in traces[:5])

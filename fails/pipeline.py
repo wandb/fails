@@ -69,7 +69,7 @@ class Args:
     model: str = "gemini/gemini-2.5-pro"
     debug: bool = False
     force_column_selection: bool = False
-    config_file: str = os.path.expanduser("~/.wandb/failure_categorization_config.yaml")
+    config_file: str = "./config/failure_categorization_config.yaml"
     wandb_entity: str = "wandb-applied-ai-team"
     wandb_project: str = "eval-failures"
     wandb_logging_entity: str = "wandb-applied-ai-team"
@@ -650,12 +650,12 @@ async def final_classification(
         final_classification_llm, final_classification_prompt_str
     )
 
+    # Add the trace_id to the classification result
     final_classification_result = FinalClassificationResult(
         trace_id=trace_id,
         thinking=classification_result.final_output.thinking,
-        selected_category=classification_result.final_output.selected_category,
-        confidence_score=classification_result.final_output.confidence_score,
-        classification_notes=classification_result.final_output.classification_notes,
+        failure_category=classification_result.final_output.failure_category,
+        categorization_reason=classification_result.final_output.categorization_reason,
     )
 
     return final_classification_result
@@ -868,9 +868,9 @@ async def run_pipeline(
     console.print(review_data.category_long_list_thinking)
     console.print("-" * 80)
     for category in review_data.task_failure_categories:
-        console.print(f"Category: {category.category_name}")
-        console.print(f"Description: {category.category_description}")
-        console.print(f"Notes: {category.category_notes}")
+        console.print(f"Category: {category.failure_category_name}")
+        console.print(f"Description: {category.failure_category_definition}")
+        console.print(f"Notes: {category.failure_category_notes}")
         console.print("-" * 80)
 
 
@@ -882,18 +882,18 @@ async def run_pipeline(
     all_categories = review_data.task_failure_categories + [
         Category(
             thinking="This is the default category for failures that don't fit into any other category",
-            category_name="other",
-            category_description="Can be used if the evaluation failure sample can't be classified into one of the other classes",
-            category_notes="Default category for unclassifiable failures"
+            failure_category_name="other",
+            failure_category_definition="Can be used if the evaluation failure sample can't be classified into one of the other classes",
+            failure_category_notes="Default category for unclassifiable failures"
         )
     ]
 
     # Format categories for the prompt
     categories_str = ""
     for i, category in enumerate(all_categories):
-        categories_str += f"\n### Category {i + 1}: {category.category_name}\n"
-        categories_str += f"**Description:** {category.category_description}\n"
-        categories_str += f"**Notes:** {category.category_notes}\n"
+        categories_str += f"\n### Category {i + 1}: {category.failure_category_name}\n"
+        categories_str += f"**Description:** {category.failure_category_definition}\n"
+        categories_str += f"**Notes:** {category.failure_category_notes}\n"
 
     if debug:
         final_classification_prompt_str = construct_final_classification_prompt(
@@ -941,7 +941,7 @@ async def run_extract_and_classify_pipeline(
     user_context: str,
     debug: bool,
     model: str,
-    config_file: str,
+    config_file_path: str,
     wandb_entity: str,
     wandb_project: str,
     force_column_selection: bool = False,
@@ -974,7 +974,7 @@ async def run_extract_and_classify_pipeline(
 
     # Check for saved column preferences
     failure_config, columns_for_query = get_column_preferences(
-        config_file=config_file,
+        config_file=config_file_path,
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
         eval_id=eval_id,
@@ -1089,6 +1089,8 @@ What the user is trying to evaluate in their AI system:
 
     args: Args = simple_parsing.parse(Args)
 
+    args.config_file = f"./config/{args.wandb_entity}_{args.wandb_project}_config.yaml"
+
     if not user_context_str:
         raise ValueError(
             "User context is required. Please provide a user context about the AI system and what they are trying to evaluate."
@@ -1102,7 +1104,7 @@ What the user is trying to evaluate in their AI system:
             user_context=user_context_str,
             debug=args.debug,
             model=model,
-            config_file=args.config_file,
+            config_file_path=args.config_file,
             force_column_selection=args.force_column_selection,
             wandb_entity=args.wandb_entity,
             wandb_project=args.wandb_project,
