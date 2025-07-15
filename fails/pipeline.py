@@ -543,6 +543,7 @@ async def draft_categorization(
     model: str,
     debug: bool = False,
 ) -> FirstPassCategorizationResult:
+    
     draft_categorization_llm = Agent(
         name="Row by Row",
         instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
