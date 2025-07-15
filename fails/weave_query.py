@@ -57,6 +57,55 @@ class WeaveQueryClient:
             "Accept": "application/jsonl",
         }
 
+    @weave.op
+    def _make_api_request(
+        self, 
+        url: str, 
+        headers: Dict[str, str], 
+        data: Union[str, Dict[str, Any]], 
+        timeout: int = 30, 
+        stream: bool = False
+    ) -> requests.Response:
+        """
+        Make an API request with all parameters explicitly passed.
+        
+        This method contains all request parameters in its signature to enable
+        proper logging via decorators.
+        
+        Args:
+            url: The full URL endpoint
+            headers: Request headers
+            data: Request payload (either JSON string or dict)
+            timeout: Request timeout in seconds
+            stream: Whether to stream the response
+            
+        Returns:
+            The requests Response object
+            
+        Raises:
+            requests.HTTPError: If the request fails
+        """
+        # Convert dict to JSON string if needed
+        if isinstance(data, dict):
+            data = json.dumps(data)
+            
+        response = requests.post(
+            url,
+            headers=headers,
+            data=data,
+            timeout=timeout,
+            stream=stream
+        )
+        
+        # Check for errors
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}")
+            print(f"Response: {response.text}")
+            response.raise_for_status()
+            
+        return response
+
+    @weave.op
     def _execute_query(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Execute a query to the Weave API.
@@ -70,20 +119,14 @@ class WeaveQueryClient:
         endpoint = f"{self.config.base_url}/calls/stream_query"
 
         try:
-            # Make request with stream=True (this works in our test)
-            response = requests.post(
-                endpoint,
+            # Use the common API request method
+            response = self._make_api_request(
+                url=endpoint,
                 headers=self.headers,
-                data=json.dumps(query),
+                data=query,
                 timeout=30,
-                stream=True,
+                stream=True
             )
-
-            # Check for errors
-            if response.status_code != 200:
-                print(f"Error: {response.status_code}")
-                print(f"Response: {response.text}")
-                response.raise_for_status()
 
             # Parse JSONL response
             results = []
@@ -432,13 +475,14 @@ class WeaveQueryClient:
         }
         
         try:
-            response = requests.post(
-                endpoint,
-                json=payload,
+            # Use the common API request method
+            response = self._make_api_request(
+                url=endpoint,
                 headers=headers,
-                timeout=30
+                data=payload,
+                timeout=30,
+                stream=False
             )
-            response.raise_for_status()
             
             # Get values in order of unique_refs
             result_values = response.json()["vals"]
@@ -1002,6 +1046,67 @@ def query_evaluation_data(
                 result["resolved_refs"] = {}
     
     return result
+
+
+@weave.op
+def filter_evaluation_data_columns(
+    eval_data: Dict[str, Any], 
+    selected_columns: List[str]
+) -> Dict[str, Any]:
+    """
+    Filter evaluation data to only include selected column paths.
+    
+    This function filters the evaluation data structure, including child traces
+    and descendants, to only include the specified columns. This is useful for
+    reducing the amount of data returned when only specific fields are needed.
+    
+    Args:
+        eval_data: The evaluation data dictionary returned by query_evaluation_data
+        selected_columns: List of column paths to keep (e.g., ["inputs.example.call_name"])
+        
+    Returns:
+        The filtered evaluation data dictionary
+    """
+    from fails.utils import filter_trace_data_by_columns
+    
+    # Create a copy to avoid modifying the original
+    filtered_data = eval_data.copy()
+    
+    # Filter child traces if present
+    if "children" in filtered_data and filtered_data["children"]:
+        filtered_data["children"] = filter_trace_data_by_columns(
+            filtered_data["children"], 
+            selected_columns
+        )
+    
+    # Filter all descendants if present
+    if "all_descendants" in filtered_data and filtered_data["all_descendants"]:
+        filtered_data["all_descendants"] = filter_trace_data_by_columns(
+            filtered_data["all_descendants"],
+            selected_columns
+        )
+    
+    # Filter the evaluation trace itself
+    if "evaluation" in filtered_data:
+        filtered_data["evaluation"] = filter_trace_data_by_columns(
+            [filtered_data["evaluation"]], 
+            selected_columns
+        )[0]
+    
+    # Rebuild hierarchy if present (it will use the filtered traces)
+    if "hierarchy" in filtered_data and "evaluation" in filtered_data:
+        if "all_descendants" in filtered_data:
+            filtered_data["hierarchy"] = build_trace_hierarchy(
+                filtered_data["evaluation"], 
+                filtered_data["all_descendants"]
+            )
+        elif "children" in filtered_data:
+            filtered_data["hierarchy"] = build_trace_hierarchy(
+                filtered_data["evaluation"], 
+                filtered_data["children"]
+            )
+    
+    return filtered_data
 
 
 def get_available_columns(

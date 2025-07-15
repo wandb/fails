@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import List
 
+from pydantic import BaseModel, Field
 
 EVALUATION_FAILURE_DEFINITION = """An evaluation failure is defined as the output of a single row \
 that failed the evaluator or scorer criteria. An individual row that failed can evaluation might do so for a \
@@ -94,12 +95,18 @@ or making up reasons for the eval decision. You can still use this data, just be
 
 """
 
+
 class FirstPassCategory(BaseModel):
     """A first pass categorization of a single evaluation failure."""
 
     category_name: str = Field(description="The name of the category.")
-    category_description: str = Field(description="A high-level, generic, short description and justification for the category.")
-    eval_failure_note: str = Field(description="A sentence or two of notes sepcific to what was observed in this individual evaluation failure.")
+    category_description: str = Field(
+        description="A high-level, generic, short description and justification for the category."
+    )
+    eval_failure_note: str = Field(
+        description="A sentence or two of notes sepcific to what was observed in this individual evaluation failure."
+    )
+
 
 class FirstPassCategorization(BaseModel):
     """First pass classification of a single evaluation failure."""
@@ -161,6 +168,7 @@ Output a list of maximum {MAX_N_TASK_FAILURE_CATEGORIES} task failure categories
 
 ## ----------------- Step 3 - Category Review -----------------
 
+
 class Category(BaseModel):
     """A task failure category."""
 
@@ -168,15 +176,15 @@ class Category(BaseModel):
         description="A detailed reasoning process behind the selection of the category \
 name, description and notes."
     )
-    category_name: str = Field(
+    failure_category_name: str = Field(
         description="""The name of the task failure category. Keep all category \
 names lowercase, concise and separated by '_'. If a trace doesn't fit into any of the defined task failure \
 categories, it should be classified as 'other'."""
     )
-    category_description: str = Field(
-        description="A short description of the task failure category."
+    failure_category_definition: str = Field(
+        description="A short definition of the task failure category."
     )
-    category_notes: str = Field(
+    failure_category_notes: str = Field(
         description="A sentence or two of notes for the task failure category."
     )
 
@@ -249,33 +257,28 @@ Analyze the above evaluation failure and classify it into ONE of the available c
 If none of the categories are appropriate, classify it as "other".
 """
 
+
 class FinalClassification(BaseModel):
     """Final classification of a single evaluation failure into predefined categories."""
-    
+
     thinking: str = Field(
         description="A detailed reasoning process explaining why this specific failure \
 belongs to the selected category. Consider the failure characteristics, the category \
 definitions, and why this is the best match among all available categories."
     )
-    selected_category: str = Field(
-        description="The selected category name from the available categories. \
+    failure_category: str = Field(
+        description="The selected category name from the available failurecategories. \
 Must be one of the provided category names or 'other'."
     )
-    confidence_score: float = Field(
-        description="A confidence score between 0.0 and 1.0 indicating how well \
-this failure fits the selected category.",
-        ge=0.0,
-        le=1.0
-    )
-    classification_notes: str = Field(
-        description="Brief notes explaining any specific aspects of this failure \
+    categorization_reason: str = Field(
+        description="Brief notes explaining any specific aspects of this sampled failure \
 that influenced the classification decision."
     )
 
 
 class FinalClassificationResult(FinalClassification):
     """Final classification result with trace ID."""
-    
+
     trace_id: str = Field(description="The ID of the trace that was classified.")
 
 
@@ -329,6 +332,8 @@ task failure categories for the given row input and row output.
 
 Does the eval failure you can see above fall into any of the proposed failure categories?
 """
+
+
 class CategoryReview(BaseModel):
     """A task failure category."""
 
@@ -344,4 +349,9 @@ name, description and notes."
 category that is appropriate for this particular eval failure."
     )
 
+
 # -----------------------------------------------------
+class PipelineResult(BaseModel):
+    failure_categories: List[Category]
+    classifications: List[FinalClassificationResult]
+    report: str = ""

@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,7 +14,6 @@ import yaml
 from agents import Agent, Runner, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -24,25 +22,29 @@ from rich.table import Table
 from fails.cli.arrow_selector import simple_arrow_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
-    CATEGORIZATION_REVIEW_PROMPT,
-    CATEGORIZATION_REVIEW_SYSTEM_PROMPT,
+    FIRST_PASS_CATEGORIZATION_PROMPT,
+    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
     CLUSTERING_PROMPT,
     CLUSTERING_SYSTEM_PROMPT,
     FINAL_CLASSIFICATION_PROMPT,
     FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-    FIRST_PASS_CATEGORIZATION_PROMPT,
-    FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-    Category,
-    CategoryReview,
-    ClusteringCategories,
+    FirstPassCategorizationResult,
+    FirstPassCategorization,
     FinalClassification,
     FinalClassificationResult,
-    FirstPassCategorization,
-    FirstPassCategorizationResult,
+    Category,
+    ClusteringCategories,
+    PipelineResult,
 )
-from fails.utis import filter_trace_data_by_columns
+from fails.utils import (
+    display_evaluation_summary,
+    generate_evaluation_report,
+    prepare_trace_data_for_pipeline,
+    validate_failure_column,
+)
 from fails.weave_query import (
     TraceDepth,
+    filter_evaluation_data_columns,
     get_available_columns,
     query_evaluation_data,
 )
@@ -735,7 +737,7 @@ async def run_pipeline(
     model: str,
     debug: bool = False,
     console: Console = Console(),
-):
+) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
     console.print("[bold blue]📝 STEP 1: Starting draft categorization...[/bold blue]")
 
@@ -790,7 +792,7 @@ async def run_pipeline(
 
     for c_i, draft_categorization_result in enumerate(draft_categorization_results):
         draft_categorization_results_str += (
-            f"### Evaluation Trace ID: {draft_categorization_result.trace_id}\n\n"
+            f"### Evaluation Trace ID:\nTrace ID: {draft_categorization_result.trace_id}\n\n"
         )
 
         if debug:
@@ -918,14 +920,18 @@ async def run_pipeline(
             )
         )
 
-    final_classification_results = await run_final_classification(
+    classification_results_per_trace = await run_final_classification(
         trace_data=trace_data,
         user_context=user_context,
         available_categories_str=categories_str,
         model=model,
         debug=debug,
     )
-    return final_classification_results, all_categories
+
+    return PipelineResult(
+        failure_categories=all_categories,
+        classifications=classification_results_per_trace
+    )
 
 
 
@@ -939,7 +945,7 @@ async def run_extract_and_classify_pipeline(
     wandb_entity: str,
     wandb_project: str,
     force_column_selection: bool = False,
-):
+) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
 
@@ -990,221 +996,42 @@ async def run_extract_and_classify_pipeline(
         filter_dict={failure_config["failure_column"]: failure_config["failure_value"]} if failure_config else None,
     )
     
-    # Filter the child traces to only include selected columns
-    if "children" in eval_data and eval_data["children"]:
-        eval_data["children"] = filter_trace_data_by_columns(
-            eval_data["children"], 
-            columns_for_query
-        )
+    # ----------------- Data Processing -----------------
+    # Filter the evaluation data to only include selected columns
+    eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
 
-    op_name = eval_data["evaluation"].get("op_name", "Unknown")
-    # Truncate long op names
-    if len(op_name) > 100:
-        op_name = op_name[:90] + "..."
-
-    # Use a panel for the evaluation summary
-    eval_info = f"""[bold green]Evaluation ID:[/bold green] {eval_data["evaluation"]["id"]}
-[bold green]Op Name:[/bold green] {op_name}
-[bold green]Total traces:[/bold green] {eval_data["trace_count"]["total"]}
-[bold green]Direct children:[/bold green] {eval_data["trace_count"].get("direct_children", 0)}"""
-
-    # If we have a failure filter, add info about filtered results
-    if failure_config:
-        eval_info += f"\n[bold green]Failure filter:[/bold green] {failure_config['failure_column']} == {failure_config['failure_value']}"
-        eval_info += f"\n[bold green]Filtered children:[/bold green] {len(eval_data.get('children', []))}"
-
-    console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="green"))
+    # Display evaluation summary
+    display_evaluation_summary(eval_data, failure_config, console)
 
     # Validate failure column if one was selected
-    if failure_config and eval_data.get("children"):
-        # Check the first child trace to validate the failure column
-        first_child = eval_data["children"][0]
-        
-        # Navigate to the nested field
-        value = first_child
-        try:
-            for part in failure_config["failure_column"].split("."):
-                value = value.get(part, None)
-                if value is None:
-                    break
-            
-            if value is None:
-                console.print(f"[red]Warning: Failure column '{failure_config['failure_column']}' not found in traces![/red]")
-            elif not isinstance(value, bool):
-                console.print(f"[red]Error: Failure column '{failure_config['failure_column']}' is not a boolean! Value: {value} (type: {type(value).__name__})[/red]")
-                raise ValueError(f"Selected failure column '{failure_config['failure_column']}' is not a boolean column")
-        except (AttributeError, TypeError) as e:
-            console.print(f"[red]Error accessing failure column: {e}[/red]")
-            raise ValueError(f"Error accessing failure column '{failure_config['failure_column']}': {e}")
+    if failure_config:
+        validate_failure_column(eval_data, failure_config, console)
 
-    # Show evaluation summary if available
-    if "summary" in eval_data["evaluation"]:
-        console.print(
-            f"[yellow]Evaluation Summary: {eval_data['evaluation']['summary']}[/yellow]"
-        )
-
-    # console.print(f"[dim]Evaluation data keys:[/dim] {', '.join(eval_data.keys())}")
-    # console.print(f"[dim]Evaluation hierarchy:[/dim] {eval_data['hierarchy']}")
-
-    console.print(
-        f"[dim]First child keys:[/dim] {', '.join(eval_data['children'][0].keys())}\n"
-    )
-    trace_data = []
-
-    console.print("\n[dim]CHILDREN:[/dim]")
-    console.print(
-        f"[dim]{len(eval_data['children'])} children found, sampling first 3:[/dim]\n"
-    )
-    for i, trace in enumerate(eval_data["children"][:3]):
-        # Since we've already filtered the data, we can use it directly
-        trace_entry = {
-            "id": trace.get("id"),
-            "inputs": trace.get("inputs", {}),
-            "output": trace.get("output", {}),
-            "scores": trace.get("output", {}).get("scores", {}) if trace.get("output") else {},
-        }
-
-        trace_data.append(trace_entry)
-
-        if debug and i == 0:
-            # Create a table for trace details
-            trace_table = Table(
-                title=f"Trace {i + 1} Details",
-                show_header=True,
-                header_style="bold magenta",
-            )
-            trace_table.add_column("Property", style="cyan", width=20)
-            trace_table.add_column("Value", style="white")
-
-            trace_table.add_row("ID", trace_entry.get("id", "N/A"))
-            trace_table.add_row("Name", str(trace_entry.get("display_name", "N/A")))
-            trace_table.add_row("Op Name", trace_entry.get("op_name", "N/A"))
-            trace_table.add_row("Started At", trace_entry.get("started_at", "N/A"))
-            trace_table.add_row("Ended At", trace_entry.get("ended_at", "N/A"))
-            trace_table.add_row("Summary", "\n" + str(trace_entry.get("summary", "N/A")))
-            # trace_table.add_row("Input", "\n" + str(trace_entry.get("inputs", {})))
-            
-            if (
-                trace_entry.get("output")
-                and isinstance(trace_entry.get("output"), dict)
-                and "output" in trace_entry["output"]
-            ):
-                trace_table.add_row("Output", "\n" + str(trace["output"]["output"]))
-            console.print(trace_table)
-            console.print("[dim]" + "─" * 50 + "[/dim]\n")
-
+    # Prepare trace data for pipeline
+    trace_data = prepare_trace_data_for_pipeline(eval_data, debug, console, sample_size=3)
 
     console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
 
-    final_classification_results, all_categories = await run_pipeline(
+    # ----------------- Pipeline Execution -----------------
+    pipeline_result = await run_pipeline(
         trace_data=trace_data,
         user_context=user_context,
         model=model,
         debug=debug,
         console=console,
     )
+    final_classification_results = pipeline_result.classifications
+    all_categories = pipeline_result.failure_categories
 
     # ----------------- Generate Evaluation Report -----------------
 
     console.print("\n[bold blue]📊 STEP 4: Generating evaluation report...[/bold blue]")
     
-    # Create a summary of classifications
-    classification_summary = {}
-    total_failures = len(final_classification_results)
-    
-    for result in final_classification_results:
-        category = result.selected_category
-        if category not in classification_summary:
-            classification_summary[category] = {
-                "traces": [],
-                "category_info": None
-            }
-        classification_summary[category]["traces"].append({
-            "trace_id": result.trace_id,
-            "confidence": result.confidence_score,
-            "notes": result.classification_notes
-        })
-    
-    # Get category info from all_categories
-    for category in all_categories:
-        if category.category_name in classification_summary:
-            classification_summary[category.category_name]["category_info"] = category
-    
-    # Sort categories by count (descending)
-    sorted_categories = sorted(
-        classification_summary.items(), 
-        key=lambda x: len(x[1]["traces"]), 
-        reverse=True
+    report = generate_evaluation_report(
+        final_classification_results=final_classification_results,
+        all_categories=all_categories,
+        eval_name=eval_data["evaluation"].get("display_name", eval_id)
     )
-    
-    # Generate report
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
-    # Get evaluation name from eval_data
-    eval_name = eval_data["evaluation"].get("display_name", eval_id)
-    
-    report = f"## {eval_name} Evaluation Report - {current_time}\n\n"
-    
-    # Add summary table to the report
-    # Calculate max widths for alignment
-    max_category_width = max(len(category_name.replace("_", " ").title()) for category_name in classification_summary.keys())
-    max_category_width = max(max_category_width, len("Category"))
-    
-    # Create the table header
-    report += f"{'Category'.ljust(max_category_width)} | {'Count'.center(10)} | {'Percentage'.center(12)}\n"
-    report += f"{'-' * max_category_width} | {'-' * 10} | {'-' * 12}\n"
-    
-    # Add table rows
-    for category_name, category_data in sorted_categories:
-        traces = category_data["traces"]
-        count = len(traces)
-        percentage = (count / total_failures) * 100
-        display_name = category_name.replace("_", " ").title()
-        
-        report += f"{display_name.ljust(max_category_width)} | {str(count).center(10)} | {f'{percentage:.1f}%'.center(12)}\n"
-    
-    report += "\n"
-    report += f"### Failure Categories:\n\n"
-    
-    for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
-        traces = category_data["traces"]
-        category_info = category_data["category_info"]
-        count = len(traces)
-        percentage = (count / total_failures) * 100
-        
-        # Format category name for display
-        display_name = category_name.replace("_", " ").title()
-        
-        report += f"{idx}. **{display_name}**\n\n"
-        report += f"Count: {count} ({percentage:.1f}% of failures)\n\n"
-        
-        if category_info:
-            report += f"{category_info.category_description}\n\n"
-        
-        # Add examples section only if there are notes to show
-        has_examples = any(trace["notes"] for trace in traces[:5])
-        if has_examples:
-            report += "Examples:\n\n"
-            
-            # Show up to 5 example trace IDs and notes
-            for i, trace in enumerate(traces[:5]):
-                if trace["notes"]:
-                    report += f"  Trace: {trace['trace_id']}\n"
-                    report += f"  {trace['notes']}\n"
-                    if i < min(4, len(traces) - 1):
-                        report += "\n"
-        
-        # Add list of all trace IDs for this category
-        report += f"\nTrace IDs for this category:\n"
-        for trace in traces:
-            report += f"- {trace['trace_id']}\n"
-        report += "\n"
-        
-        if idx < len(sorted_categories):
-            report += "\n"
-    
-    report += "~" * 80 + "\n\n"
-    report += "END REPORT\n"
     
     # Display the report
     console.print("\n" + "=" * 80)
@@ -1212,6 +1039,20 @@ async def run_extract_and_classify_pipeline(
     console.print("=" * 80)
     
     console.print("\n[bold green]✅ Pipeline completed successfully![/bold green]")
+
+    pipeline_result.report = report
+
+    if debug:
+        console.print(
+            Panel(
+                pipeline_result.model_dump_json(indent=4), 
+                title="Full Pipeline Result (debug mode)",
+                border_style="blue",
+                padding=(1, 1),
+            )
+        )
+
+    return pipeline_result
 
 
 
