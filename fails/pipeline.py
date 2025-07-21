@@ -338,7 +338,7 @@ def get_column_preferences(
                 f"Filter for: [{'red' if not saved_failure_config['failure_value'] else 'green'}]"
                 f"{saved_failure_config['failure_value']}[/{'red' if not saved_failure_config['failure_value'] else 'green'}] values\n\n"
                 "[dim]To re-select, re-run with --force-column-selection[/dim]",
-                title="🚨 Failure Filter Configuration",
+                title="🔎 Failure Filter Configuration",
                 border_style="yellow",
                 padding=(1, 2),
             )
@@ -845,8 +845,8 @@ async def run_pipeline(
         for i, first_pass_category in enumerate(
             draft_categorization_result.first_pass_categories
         ):
-            draft_categorization_results_str += f"#### Candiate Category Name {i + 1}:\n\n{first_pass_category.category_name}\n\n"
-            draft_categorization_results_str += f"#### Category Description {i + 1}: {first_pass_category.category_description}\n\n"
+            draft_categorization_results_str += f"#### Candidate Category Name {i + 1}\n\n`{first_pass_category.category_name}`\n\n"
+            draft_categorization_results_str += f"#### Category Description {i + 1}:\n\n{first_pass_category.category_description}\n\n"
             draft_categorization_results_str += f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
             if debug:
                 result_table.add_row(
@@ -980,6 +980,7 @@ async def run_pipeline(
     )
 
 
+
 @weave.op
 async def run_extract_and_classify_pipeline(
     eval_id: str,
@@ -1045,6 +1046,9 @@ async def run_extract_and_classify_pipeline(
 
     # ----------------- Data Processing -----------------
     # Filter the evaluation data to only include selected columns
+    console.print(
+        f"[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
+    )
     eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
 
     # Display evaluation summary
@@ -1144,6 +1148,9 @@ What the user is trying to evaluate in their AI system:
         raise ValueError(
             "User context is required. Please provide a user context about the AI system and what they are trying to evaluate."
         )
+
+    if args.debug:
+        litellm._turn_on_debug()
 
     weave.init(f"{args.wandb_logging_entity}/{args.wandb_logging_project}")
 
