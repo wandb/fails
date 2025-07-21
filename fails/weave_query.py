@@ -5,11 +5,14 @@ Minimal implementation for querying Weave evaluation traces.
 import os
 import json
 import base64
+import time
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple, Type
 from enum import Enum
+from functools import wraps
 import weave
 import requests
+from requests.exceptions import ConnectionError, Timeout, HTTPError
 from dotenv import load_dotenv
 from rich.console import Console
 
@@ -19,6 +22,61 @@ from fails.utils import filter_trace_data_by_columns
 load_dotenv()
 
 console = Console()
+
+
+def retry_on_failure(
+    max_retries: int = 3,
+    backoff_factor: float = 1.0,
+    exceptions: Tuple[Type[Exception], ...] = (ConnectionError, Timeout, HTTPError),
+    on_retry: Optional[Any] = None
+):
+    """
+    Decorator to retry a function on failure with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        backoff_factor: Factor for exponential backoff (delay = backoff_factor * 2^retry_count)
+        exceptions: Tuple of exceptions to catch and retry
+        on_retry: Optional callback function called on each retry with (attempt, exception)
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    
+                    # Don't retry on last attempt
+                    if attempt == max_retries:
+                        break
+                    
+                    # Don't retry on 4xx errors (client errors) except 429 (rate limit)
+                    if isinstance(e, HTTPError) and e.response is not None:
+                        if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                            raise
+                    
+                    # Calculate delay with exponential backoff
+                    delay = backoff_factor * (2 ** attempt)
+                    
+                    # Call retry callback if provided
+                    if on_retry:
+                        on_retry(attempt + 1, e)
+                    else:
+                        # Default logging
+                        console.print(f"[yellow]Retry attempt {attempt + 1}/{max_retries} after {type(e).__name__}. Waiting {delay}s...[/yellow]")
+                    
+                    # Sleep before retrying
+                    time.sleep(delay)
+            
+            # If we get here, all retries failed
+            raise last_exception
+        
+        return wrapper
+    return decorator
 
 
 class TraceDepth(Enum):
@@ -93,22 +151,32 @@ class WeaveQueryClient:
         # Convert dict to JSON string if needed
         if isinstance(data, dict):
             data = json.dumps(data)
-            
-        response = requests.post(
-            url,
-            headers=headers,
-            data=data,
-            timeout=timeout,
-            stream=stream
-        )
         
-        # Check for errors
-        if response.status_code != 200:
-            print(f"Error: {response.status_code}")
-            print(f"Response: {response.text}")
-            response.raise_for_status()
+        # Define the actual request function with retry logic
+        @retry_on_failure(
+            max_retries=3,
+            backoff_factor=1.0,
+            exceptions=(ConnectionError, Timeout, HTTPError)
+        )
+        def _make_request():
+            response = requests.post(
+                url,
+                headers=headers,
+                data=data,
+                timeout=timeout,
+                stream=stream
+            )
             
-        return response
+            # Check for errors
+            if response.status_code != 200:
+                print(f"Error: {response.status_code}")
+                print(f"Response: {response.text}")
+                response.raise_for_status()
+                
+            return response
+        
+        # Execute the request with retry logic
+        return _make_request()
 
     @weave.op
     def _execute_query(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -198,18 +266,19 @@ class WeaveQueryClient:
         columns: Optional[List[str]] = None,
         limit: int | None = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        op_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Query all child calls of an evaluation.
 
-        Uses the direct filter approach with parent_ids to ensure only
-        direct children are returned.
+        Uses the correct Weave API filter syntax with both filter and query parameters.
 
         Args:
             evaluation_call_id: The evaluation call ID
             columns: Columns to retrieve
             limit: Maximum number of results
-            filter_dict: Optional filter dictionary (e.g., {"column_name": value})
+            filter_dict: Optional filter dictionary (e.g., {"output.scores.affiliation_score.correct": False})
+            op_name: Optional operation name for filtering
 
         Returns:
             List of child trace dictionaries
@@ -224,47 +293,54 @@ class WeaveQueryClient:
                 "op_name",
                 "display_name",
                 "inputs",
-                "output",  # Changed from "outputs" to "output" - the correct column name
+                "output",
                 "summary",
                 "exception",
             ]
 
-        # Build the filter
+        # Build the base filter with parent_ids
         base_filter = {
-            "parent_ids": [evaluation_call_id]  # Use direct filter instead of query expression
+            "parent_ids": [evaluation_call_id]
         }
         
-        # If additional filters are provided, we need to combine them
-        if filter_dict:
-            # Create a combined filter using AND operation
-            filters = [
-                {"op": "InOperation", "field": "parent_id", "value": [evaluation_call_id]}
-            ]
-            
-            # Add custom filters
-            for field, value in filter_dict.items():
-                filters.append({
-                    "op": "EqOperation",
-                    "field": field,
-                    "value": value
-                })
-            
-            # Combine with AND
-            query_filter = {
-                "op": "AndOperation",
-                "filters": filters
-            }
-        else:
-            # Use simple parent_ids filter
-            query_filter = base_filter
+        # Add op_name to filter if provided
+        if op_name:
+            base_filter["op_names"] = [op_name]
 
-        # Query for calls where parent_id matches the evaluation
+        # Build the query structure
         query = {
             "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
-            "filter": query_filter if filter_dict else base_filter,
+            "filter": base_filter,
             "columns": columns,
             "sort_by": [{"field": "started_at", "direction": "asc"}],
         }
+        
+        # If additional filters are provided, use the query parameter with $expr
+        if filter_dict:
+            # Build $expr query for complex filtering
+            expr_conditions = []
+            
+            for field, value in filter_dict.items():
+                # Convert boolean values to string for $literal
+                literal_value = str(value).lower() if isinstance(value, bool) else value
+                
+                expr_conditions.append({
+                    "$eq": [
+                        {"$getField": field},
+                        {"$literal": literal_value}
+                    ]
+                })
+            
+            # If multiple conditions, combine with $and
+            if len(expr_conditions) == 1:
+                query["query"] = {"$expr": expr_conditions[0]}
+            else:
+                query["query"] = {"$expr": {"$and": expr_conditions}}
+            
+            # Add sorting for filtered fields
+            for field in filter_dict.keys():
+                query["sort_by"] = [{"field": field, "direction": "asc"}]
+                break  # Just use the first field for sorting
 
         if limit is not None:
             query["limit"] = limit
@@ -279,6 +355,7 @@ class WeaveQueryClient:
         max_depth: Optional[int] = None,
         current_depth: int = 0,
         filter_dict: Optional[Dict[str, Any]] = None,
+        op_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Recursively query all descendants of a trace.
@@ -302,7 +379,8 @@ class WeaveQueryClient:
             evaluation_call_id=parent_id, 
             columns=columns, 
             limit=limit_per_level,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            op_name=op_name
         )
 
         all_traces = []
@@ -320,6 +398,7 @@ class WeaveQueryClient:
                 max_depth=max_depth,
                 current_depth=current_depth + 1,
                 filter_dict=filter_dict,
+                op_name=op_name,
             )
 
             all_traces.extend(descendants["traces"])
@@ -768,6 +847,18 @@ def query_evaluation_trace_data(
     elif trace_depth == TraceDepth.DIRECT_CHILDREN:
         # Query direct children only
         try:
+            # If we have a filter_dict, we need to get the op_name first
+            op_name = None
+            if filter_dict:
+                # Get one child to find the op_name
+                sample_children = client.query_evaluation_children(
+                    evaluation_call_id=eval_trace["id"],
+                    columns=["op_name"],
+                    limit=1
+                )
+                if sample_children:
+                    op_name = sample_children[0].get("op_name")
+            
             child_query_kwargs = {
                 "evaluation_call_id": eval_trace["id"],
                 "columns": columns,
@@ -776,6 +867,8 @@ def query_evaluation_trace_data(
                 child_query_kwargs["limit"] = limit
             if filter_dict is not None:
                 child_query_kwargs["filter_dict"] = filter_dict
+            if op_name is not None:
+                child_query_kwargs["op_name"] = op_name
 
             child_traces = client.query_evaluation_children(**child_query_kwargs)
 
@@ -797,11 +890,25 @@ def query_evaluation_trace_data(
     elif trace_depth == TraceDepth.ALL_DESCENDANTS:
         # Recursively query all descendants
         try:
+            # If we have a filter_dict, we need to get the op_name first
+            op_name = None
+            if filter_dict:
+                # Get one child to find the op_name
+                sample_children = client.query_evaluation_children(
+                    evaluation_call_id=eval_trace["id"],
+                    columns=["op_name"],
+                    limit=1
+                )
+                if sample_children:
+                    op_name = sample_children[0].get("op_name")
+            
             descendants_kwargs = {"parent_id": eval_trace["id"], "columns": columns}
             if limit is not None:
                 descendants_kwargs["limit_per_level"] = limit
             if filter_dict is not None:
                 descendants_kwargs["filter_dict"] = filter_dict
+            if op_name is not None:
+                descendants_kwargs["op_name"] = op_name
 
             descendants_data = client.query_descendants_recursive(**descendants_kwargs)
 
