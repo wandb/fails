@@ -382,3 +382,103 @@ The `weave_query.py` module includes basic error handling:
    - Malformed queries
 
 These improvements make the Weave query module more robust and production-ready while maintaining backward compatibility.
+
+## Enhanced Filtering Capabilities in weave_query.py
+
+The `query_evaluation_children` method now supports comprehensive filtering options beyond simple boolean values. This enables powerful server-side filtering using MongoDB-style query syntax.
+
+### Supported Filter Types
+
+1. **Basic Value Filtering**
+   - **Booleans**: `{"field": False}` - Converted to lowercase strings ("true"/"false")
+   - **Floats**: `{"field": 3.14}` - Uses `$convert` to "double" for comparison
+   - **Integers**: `{"field": 42}` - Uses `$convert` to "int" for comparison
+   - **Strings**: `{"field": "value"}` - Direct comparison
+   - **Null values**: `{"field": None}` - Direct comparison
+   - **Empty strings**: `{"field": ""}` - Direct comparison
+
+2. **String Operations**
+   - **Contains**: `{"field": {"$contains": "substring"}}`
+   - **Not Contains**: `{"field": {"$not_contains": "substring"}}`
+
+3. **Comparison Operators**
+   - **Greater Than**: `{"field": {"$gt": value}}`
+   - **Greater or Equal**: `{"field": {"$gte": value}}`
+   - **Less Than**: `{"field": {"$lt": value}}`
+   - **Less or Equal**: `{"field": {"$lte": value}}`
+   - **Not Equal**: `{"field": {"$ne": value}}`
+
+4. **Array Operations**
+   - **In Array**: `{"field": {"$in": [value1, value2]}}`
+   - **Not In Array**: `{"field": {"$nin": [value1, value2]}}`
+
+5. **Existence Checks**
+   - **Field Exists**: `{"field": {"$exists": True}}`
+   - **Field Not Exists**: `{"field": {"$exists": False}}`
+
+6. **Date/Timestamp Filtering**
+   - Timestamps (started_at, ended_at) work with comparison operators without conversion
+   - Example: `{"started_at": {"$gte": 1752500000.0}}`
+
+### Usage Examples
+
+```python
+from fails.weave_query import WeaveQueryConfig, WeaveQueryClient
+
+# Create client
+config = WeaveQueryConfig(
+    wandb_entity="wandb-applied-ai-team",
+    wandb_project="eval-failures"
+)
+client = WeaveQueryClient(config)
+
+# Example 1: Filter by boolean value
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.scores.affiliation_score.correct": False}
+)
+
+# Example 2: Filter by float with greater than
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.model_latency": {"$gt": 2.0}}
+)
+
+# Example 3: Filter by string containing substring
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.output.affiliation": {"$contains": "ext"}}
+)
+
+# Example 4: Complex filter with multiple conditions
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={
+        "output.scores.correct": False,
+        "output.model_latency": {"$gt": 2.0},
+        "output.status": {"$in": ["completed", "success"]},
+        "started_at": {"$gte": 1752500000.0}
+    }
+)
+
+# Example 5: Filter for null or empty values
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={
+        "output.error": None,  # Find traces where error is null
+        "inputs.inputs.row_output": ""  # Find traces where row_output is empty
+    }
+)
+```
+
+### Implementation Details
+
+The filtering logic automatically detects the type of each filter value and applies the appropriate MongoDB query syntax:
+
+1. **Type Detection**: The implementation checks if a value is a dict (for operators), bool, float, int, None, or string
+2. **Operator Handling**: When a dict is provided as the value, it extracts the operator and operand
+3. **Numeric Conversions**: Float and integer comparisons use `$convert` for proper type handling, except for timestamp fields
+4. **Boolean Conversion**: Boolean values are converted to lowercase strings as required by the Weave API
+5. **Multiple Conditions**: When multiple filter conditions are provided, they're combined with `$and`
+
+This enhanced filtering capability makes it much easier to query specific subsets of evaluation traces based on any combination of conditions.

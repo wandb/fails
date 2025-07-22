@@ -20,7 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from fails.cli.arrow_selector import simple_arrow_selection
+from fails.cli.column_context_selector import simple_arrow_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
     CLUSTERING_PROMPT,
@@ -69,7 +69,7 @@ class Args:
 
     model: str = "gemini/gemini-2.5-pro"
     debug: bool = False
-    force_column_selection: bool = False
+    force_column_selection: bool = False  # Force re-selection of both failure column and context columns
     config_file: str = "./config/failure_categorization_config.yaml"
     wandb_entity: str = "wandb-applied-ai-team"
     wandb_project: str = "eval-failures"
@@ -146,7 +146,7 @@ def load_column_preferences(
 
 @weave.op
 def save_column_preferences(
-    config_file: str, wandb_entity: str, wandb_project: str, columns: List[str]
+    config_file: str, wandb_entity: str, wandb_project: str, columns: List[str], console: Console
 ) -> None:
     """
     Save column preferences for a specific project to config file.
@@ -156,6 +156,7 @@ def save_column_preferences(
         wandb_entity: Weave entity name
         wandb_project: Weave project name
         columns: List of column names to save
+        console: Rich console instance
     """
     config_path = Path(config_file)
 
@@ -185,7 +186,7 @@ def save_column_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    print(f"[green]✓ Saved column preferences to {config_file}[/green]")
+    console.print(f"[green]✓ Saved column preferences to {config_file}[/green]")
 
 
 @weave.op
@@ -201,7 +202,8 @@ def load_failure_column_preferences(
         wandb_project: Weave project name
 
     Returns:
-        Dict with 'failure_column' and 'failure_value' if preferences exist, None otherwise
+        Dict with 'failure_column' and 'failure_filter' if preferences exist, None otherwise
+        The 'failure_filter' can be either a direct value or a dict with operator
     """
     config_path = Path(config_file)
 
@@ -219,12 +221,22 @@ def load_failure_column_preferences(
             config
             and project_key in config
             and "failure_column" in config[project_key]
-            and "failure_value" in config[project_key]
         ):
-            return {
+            result = {
                 "failure_column": config[project_key]["failure_column"],
-                "failure_value": config[project_key]["failure_value"],
             }
+            
+            # Handle both old and new format
+            if "failure_filter" in config[project_key]:
+                # New format with operator support
+                result["failure_filter"] = config[project_key]["failure_filter"]
+            elif "failure_value" in config[project_key]:
+                # Old format - convert to new format
+                result["failure_filter"] = {"$eq": config[project_key]["failure_value"]}
+            else:
+                return None
+                
+            return result
 
         return None
 
@@ -239,7 +251,8 @@ def save_failure_column_preferences(
     wandb_entity: str,
     wandb_project: str,
     failure_column: str,
-    failure_value: bool,
+    failure_value: Any,
+    console: Console,
 ) -> None:
     """
     Save failure column preferences for a specific project to config file.
@@ -249,7 +262,8 @@ def save_failure_column_preferences(
         wandb_entity: Weave entity name
         wandb_project: Weave project name
         failure_column: The column name to filter by
-        failure_value: The boolean value to filter for
+        failure_value: The filter value (can be a direct value or dict with operator)
+        console: Rich console instance
     """
     config_path = Path(config_file)
 
@@ -274,13 +288,20 @@ def save_failure_column_preferences(
         config[project_key] = {}
 
     config[project_key]["failure_column"] = failure_column
-    config[project_key]["failure_value"] = failure_value
+    
+    # Save the filter value in a consistent format
+    if isinstance(failure_value, dict):
+        # It's already in operator format
+        config[project_key]["failure_filter"] = failure_value
+    else:
+        # Direct value means equals operator
+        config[project_key]["failure_filter"] = {"$eq": failure_value}
 
     # Save config as YAML
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    print(f"[green]✓ Saved failure column preferences to {config_file}[/green]")
+    console.print(f"[green]✓ Saved failure column preferences to {config_file}[/green]")
 
 
 @weave.op
@@ -307,7 +328,7 @@ def get_column_preferences(
 
     Returns:
         Tuple of (failure_config, columns_list) where:
-        - failure_config: Dict with 'failure_column' and 'failure_value' or None
+        - failure_config: Dict with 'failure_column' and 'failure_filter' or None
         - columns_list: List of column names for data extraction
     """
     # First, handle failure column selection
@@ -322,6 +343,25 @@ def get_column_preferences(
         max_nesting_depth=4,
     )
     all_columns = column_info["all_columns"]
+    
+    # Extract sample values from the sample trace
+    sample_values = {}
+    if "sample_trace" in column_info:
+        sample_trace = column_info["sample_trace"]
+        for col in all_columns:
+            # Navigate through the nested structure
+            value = sample_trace
+            try:
+                for key in col.split('.'):
+                    if isinstance(value, dict) and key in value:
+                        value = value[key]
+                    else:
+                        value = None
+                        break
+                if value is not None:
+                    sample_values[col] = [value]  # Store as list for consistency
+            except (AttributeError, TypeError):
+                pass
 
     # Check for saved failure column preferences
     saved_failure_config = load_failure_column_preferences(
@@ -331,18 +371,27 @@ def get_column_preferences(
 
     if saved_failure_config and not force_column_selection:
         # Use saved failure column preferences
-        console.print(
-            Panel(
-                f"[green]Using saved failure column configuration[/green]\n\n"
-                f"Column: [cyan]{saved_failure_config['failure_column']}[/cyan]\n"
-                f"Filter for: [{'red' if not saved_failure_config['failure_value'] else 'green'}]"
-                f"{saved_failure_config['failure_value']}[/{'red' if not saved_failure_config['failure_value'] else 'green'}] values\n\n"
-                "[dim]To re-select, re-run with --force-column-selection[/dim]",
-                title="🔎 Failure Filter Configuration",
-                border_style="yellow",
-                padding=(1, 2),
-            )
-        )
+        filter_desc = ""
+        failure_filter = saved_failure_config.get('failure_filter', {})
+        
+        if isinstance(failure_filter, dict) and len(failure_filter) == 1:
+            op_key = list(failure_filter.keys())[0]
+            op_value = failure_filter[op_key]
+            
+            # Find operator symbol
+            from fails.cli.failure_selector import FailureColumnSelector
+            op_symbol = op_key
+            for op_name, op_info in FailureColumnSelector.OPERATORS.items():
+                if op_info["key"] == op_key:
+                    op_symbol = op_info["symbol"]
+                    break
+            
+            if op_key == "$eq":
+                filter_desc = f"== {op_value}"
+            else:
+                filter_desc = f"{op_symbol} {op_value}"
+        
+        # Store the failure config but don't print panel yet
         failure_config = saved_failure_config
     else:
         # Perform failure column selection
@@ -355,20 +404,26 @@ def get_column_preferences(
 
         # Interactive failure column selection
         failure_column, failure_value = interactive_failure_column_selection(
-            console, all_columns
+            console, all_columns, sample_values
         )
 
         if failure_column and failure_value is not None:
-            # Validate that the selected column exists and is boolean
-            # We'll check this when we query the data
+            # Build the failure config
             failure_config = {
                 "failure_column": failure_column,
-                "failure_value": failure_value,
             }
+            
+            # Handle the filter format
+            if isinstance(failure_value, dict):
+                # Already in operator format
+                failure_config["failure_filter"] = failure_value
+            else:
+                # Direct value means equals
+                failure_config["failure_filter"] = {"$eq": failure_value}
 
             # Save the failure column preferences
             save_failure_column_preferences(
-                config_file, wandb_entity, wandb_project, failure_column, failure_value
+                config_file, wandb_entity, wandb_project, failure_column, failure_value, console
             )
         else:
             console.print(
@@ -380,7 +435,6 @@ def get_column_preferences(
 
     if saved_columns and not force_column_selection:
         # Use saved preferences
-        console.print("\n[bold blue]📋 Using saved column preferences[/bold blue]")
         selected_columns = set(saved_columns)
 
         # Show columns grouped
@@ -395,31 +449,61 @@ def get_column_preferences(
             else:
                 other_cols.append(col)
 
-        # Build the column display content
-        column_content = f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
-        column_content += "[dim]To re-select columns, re-run the script with --force-column-selection[/dim]\n"
+        # Build combined content for both failure filter and column configuration
+        combined_content = ""
+        
+        # Add failure filter section if we have saved failure config
+        if saved_failure_config and not force_column_selection:
+            filter_desc = ""
+            failure_filter = saved_failure_config.get('failure_filter', {})
+            
+            if isinstance(failure_filter, dict) and len(failure_filter) == 1:
+                op_key = list(failure_filter.keys())[0]
+                op_value = failure_filter[op_key]
+                
+                # Find operator symbol
+                from fails.cli.failure_selector import FailureColumnSelector
+                op_symbol = op_key
+                for op_name, op_info in FailureColumnSelector.OPERATORS.items():
+                    if op_info["key"] == op_key:
+                        op_symbol = op_info["symbol"]
+                        break
+                
+                if op_key == "$eq":
+                    filter_desc = f"== {op_value}"
+                else:
+                    filter_desc = f"{op_symbol} {op_value}"
+            
+            combined_content += "[bold]🔎 Failure Filter Configuration[/bold]\n"
+            combined_content += f"[green]Using saved failure column configuration[/green]\n"
+            combined_content += f"Filter: [cyan]{saved_failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
+        
+        # Add column configuration section
+        combined_content += "[bold]📊 Column Configuration[/bold]\n"
+        combined_content += f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
+        combined_content += "[dim]To re-select both failure and context columns, re-run with --force-column-selection[/dim]\n"
 
         # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
             cols = grouped[prefix]
-            column_content += f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):\n"
+            combined_content += f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):\n"
             for col in cols[:3]:
-                column_content += f"  • {col}\n"
+                combined_content += f"  • {col}\n"
             if len(cols) > 3:
-                column_content += f"  ... and {len(cols) - 3} more\n"
+                combined_content += f"  ... and {len(cols) - 3} more\n"
 
         if other_cols:
-            column_content += (
+            combined_content += (
                 f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
             )
             for col in other_cols:
-                column_content += f"  • {col}\n"
+                combined_content += f"  • {col}\n"
 
-        # Display everything in one panel
+        # Display everything in one merged panel
         console.print(
             Panel(
-                column_content.rstrip(),
-                title="📊 Column Configuration",
+                combined_content.rstrip(),
+                title="📊 Configuration Summary",
                 border_style="yellow",
                 padding=(1, 2),
             )
@@ -509,11 +593,80 @@ def get_column_preferences(
 
         # Save preferences
         save_column_preferences(
-            config_file, wandb_entity, wandb_project, list(selected_columns)
+            config_file, wandb_entity, wandb_project, list(selected_columns), console
+        )
+
+        # Build and display combined configuration panel for new selection
+        combined_content = ""
+        
+        # Add failure filter section if one was just selected
+        if failure_config:
+            filter_desc = ""
+            failure_filter = failure_config.get('failure_filter', {})
+            
+            if isinstance(failure_filter, dict) and len(failure_filter) == 1:
+                op_key = list(failure_filter.keys())[0]
+                op_value = failure_filter[op_key]
+                
+                # Find operator symbol
+                from fails.cli.failure_selector import FailureColumnSelector
+                op_symbol = op_key
+                for op_name, op_info in FailureColumnSelector.OPERATORS.items():
+                    if op_info["key"] == op_key:
+                        op_symbol = op_info["symbol"]
+                        break
+                
+                if op_key == "$eq":
+                    filter_desc = f"== {op_value}"
+                else:
+                    filter_desc = f"{op_symbol} {op_value}"
+            
+            combined_content += "[bold]🔎 Failure Filter Configuration[/bold]\n"
+            combined_content += f"[green]New failure column configuration[/green]\n"
+            combined_content += f"Filter: [cyan]{failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
+        
+        # Add column configuration section
+        combined_content += "[bold]📊 Column Configuration[/bold]\n"
+        combined_content += f"[green]Selected {len(selected_columns)} columns[/green]\n"
+        
+        # Group columns for display
+        grouped = {}
+        other_cols = []
+        for col in sorted(selected_columns):
+            if "." in col:
+                prefix = col.split(".")[0]
+                if prefix not in grouped:
+                    grouped[prefix] = []
+                grouped[prefix].append(col)
+            else:
+                other_cols.append(col)
+        
+        # Add grouped columns to content
+        for prefix in sorted(grouped.keys()):
+            cols = grouped[prefix]
+            combined_content += f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):\n"
+            for col in cols[:5]:  # Show up to 5 columns
+                combined_content += f"  • {col}\n"
+            if len(cols) > 5:
+                combined_content += f"  ... and {len(cols) - 5} more\n"
+        
+        if other_cols:
+            combined_content += f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
+            for col in other_cols:
+                combined_content += f"  • {col}\n"
+        
+        # Display the combined panel
+        console.print(
+            Panel(
+                combined_content.rstrip(),
+                title="📊 Configuration Summary",
+                border_style="green",
+                padding=(1, 2),
+            )
         )
 
         if debug:
-            console.print("[dim]Selected columns:[/dim]")
+            console.print("\n[dim]Selected columns:[/dim]")
             for col in sorted(selected_columns):
                 console.print(f"  - {col}")
 
@@ -1039,7 +1192,7 @@ async def run_extract_and_classify_pipeline(
         trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
         include_hierarchy=True,
         limit=n_samples,
-        filter_dict={failure_config["failure_column"]: failure_config["failure_value"]}
+        filter_dict={failure_config["failure_column"]: failure_config["failure_filter"]}
         if failure_config
         else None,
     )
@@ -1110,6 +1263,24 @@ async def run_extract_and_classify_pipeline(
 
 
 if __name__ == "__main__":
+    # Create console instance for welcome message
+    console = Console()
+    
+    # Print welcome message
+    console.print("""
+     ┌───────────────────────────────────────────────────────────────────────┐
+     │                                                                       │
+     │                  ███████╗ █████╗ ██╗██╗     ███████╗                  │
+     │                  ██╔════╝██╔══██╗██║██║     ██╔════╝                  │
+     │                  █████╗  ███████║██║██║     ███████╗                  │
+     │                  ██╔══╝  ██╔══██║██║██║     ╚════██║                  │
+     │                  ██║     ██║  ██║██║███████╗███████║                  │
+     │                  ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚══════╝                  │
+     │                                                                       │
+     │                                                                       │
+     └───────────────────────────────────────────────────────────────────────┘
+    """, style="bold cyan")
+    
     eval_id = "0197a72d-2704-7ced-8c07-0fa1e0ab0557"
 
     # User AI System Context
