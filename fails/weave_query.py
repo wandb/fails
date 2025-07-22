@@ -321,15 +321,140 @@ class WeaveQueryClient:
             expr_conditions = []
             
             for field, value in filter_dict.items():
-                # Convert boolean values to string for $literal
-                literal_value = str(value).lower() if isinstance(value, bool) else value
-                
-                expr_conditions.append({
-                    "$eq": [
-                        {"$getField": field},
-                        {"$literal": literal_value}
-                    ]
-                })
+                # Handle dictionary values with operators
+                if isinstance(value, dict):
+                    # Extract operator and operand
+                    for op, operand in value.items():
+                        if op == "$contains":
+                            expr_conditions.append({
+                                "$contains": {
+                                    "input": {"$getField": field},
+                                    "substr": {"$literal": operand}
+                                }
+                            })
+                        elif op == "$not_contains":
+                            expr_conditions.append({
+                                "$not": [{
+                                    "$contains": {
+                                        "input": {"$getField": field},
+                                        "substr": {"$literal": operand}
+                                    }
+                                }]
+                            })
+                        elif op in ["$gt", "$gte", "$lt", "$lte"]:
+                            # Handle comparison operators
+                            if isinstance(operand, float) and field not in ["started_at", "ended_at"]:
+                                # Float fields need conversion
+                                expr_conditions.append({
+                                    op: [
+                                        {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                                        {"$literal": operand}
+                                    ]
+                                })
+                            elif isinstance(operand, int) and not isinstance(operand, bool) and field not in ["started_at", "ended_at"]:
+                                # Integer fields need conversion
+                                expr_conditions.append({
+                                    op: [
+                                        {"$convert": {"input": {"$getField": field}, "to": "int"}},
+                                        {"$literal": operand}
+                                    ]
+                                })
+                            else:
+                                # Timestamps, strings, or other comparisons
+                                expr_conditions.append({
+                                    op: [
+                                        {"$getField": field},
+                                        {"$literal": operand}
+                                    ]
+                                })
+                        elif op == "$ne":
+                            # Not equal
+                            if isinstance(operand, bool):
+                                literal_value = str(operand).lower()
+                            else:
+                                literal_value = operand
+                            expr_conditions.append({
+                                "$ne": [
+                                    {"$getField": field},
+                                    {"$literal": literal_value}
+                                ]
+                            })
+                        elif op == "$in":
+                            # In array
+                            expr_conditions.append({
+                                "$in": [
+                                    {"$getField": field},
+                                    {"$literal": operand}
+                                ]
+                            })
+                        elif op == "$nin":
+                            # Not in array
+                            expr_conditions.append({
+                                "$nin": [
+                                    {"$getField": field},
+                                    {"$literal": operand}
+                                ]
+                            })
+                        elif op == "$exists":
+                            # Field exists check
+                            if operand:
+                                # Field exists
+                                expr_conditions.append({
+                                    "$ne": [
+                                        {"$type": {"$getField": field}},
+                                        {"$literal": "missing"}
+                                    ]
+                                })
+                            else:
+                                # Field does not exist
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$type": {"$getField": field}},
+                                        {"$literal": "missing"}
+                                    ]
+                                })
+                # Handle direct values (equality checks)
+                elif isinstance(value, bool):
+                    # Convert boolean to string for $literal
+                    literal_value = str(value).lower()
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": literal_value}
+                        ]
+                    })
+                elif isinstance(value, float):
+                    # Use $convert for float comparison
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                            {"$literal": value}
+                        ]
+                    })
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    # Use $convert for integer comparison (bool is subclass of int in Python)
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$convert": {"input": {"$getField": field}, "to": "int"}},
+                            {"$literal": value}
+                        ]
+                    })
+                elif value is None:
+                    # Null value comparison
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": None}
+                        ]
+                    })
+                else:
+                    # String or other types - direct comparison
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": value}
+                        ]
+                    })
             
             # If multiple conditions, combine with $and
             if len(expr_conditions) == 1:
