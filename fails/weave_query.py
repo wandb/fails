@@ -367,6 +367,49 @@ class WeaveQueryClient:
                                         {"$literal": operand}
                                     ]
                                 })
+                        elif op == "$eq":
+                            # Equality operator
+                            if isinstance(operand, bool):
+                                # Convert boolean to string for $literal
+                                literal_value = str(operand).lower()
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$getField": field},
+                                        {"$literal": literal_value}
+                                    ]
+                                })
+                            elif isinstance(operand, float) and field not in ["started_at", "ended_at"]:
+                                # Use $convert for float comparison
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                                        {"$literal": operand}
+                                    ]
+                                })
+                            elif isinstance(operand, int) and not isinstance(operand, bool) and field not in ["started_at", "ended_at"]:
+                                # Use $convert for integer comparison (bool is subclass of int in Python)
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$convert": {"input": {"$getField": field}, "to": "int"}},
+                                        {"$literal": operand}
+                                    ]
+                                })
+                            elif operand is None:
+                                # Null value comparison
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$getField": field},
+                                        {"$literal": None}
+                                    ]
+                                })
+                            else:
+                                # String or other types - direct comparison
+                                expr_conditions.append({
+                                    "$eq": [
+                                        {"$getField": field},
+                                        {"$literal": operand}
+                                    ]
+                                })
                         elif op == "$ne":
                             # Not equal
                             if isinstance(operand, bool):
