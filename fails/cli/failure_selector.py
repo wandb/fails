@@ -228,7 +228,11 @@ class FailureColumnSelector:
         
         # Handle other keys
         if key == 'q':
-            return False
+            # Exit the entire program when user cancels
+            sys.stdout.write("\033[?25h\033[?1049l")  # Show cursor and exit alternate screen
+            sys.stdout.flush()
+            print("Selection cancelled by user. Exiting...")
+            sys.exit(0)
         elif key == '\r' or key == '\n' or key == ' ':  # Enter or Space
             if self.items[self.current_index][0] == 'column':
                 self.selected_column = self.items[self.current_index][1]
