@@ -46,6 +46,10 @@ class SimpleArrowSelector:
             self.items.append(('group', "Other"))
             for col in sorted(other):
                 self.items.append(('column', col))
+        
+        # Ensure we start on a column, not a group header
+        while self.current_index < len(self.items) and self.items[self.current_index][0] == 'group':
+            self.current_index += 1
     
     def run(self) -> Set[str]:
         """Run the selector with simple display."""
@@ -69,16 +73,17 @@ class SimpleArrowSelector:
                 # Move to home and clear each line as we write
                 sys.stdout.write("\033[H")
                 
-                # Header
-                sys.stdout.write("\033[K" + "=" * 90 + "\r\n")
-                # Right-aligned status
-                left_text = "Column Selection"
-                right_text = f"Selected: {len(self.selected)}/{len(self.columns)}"
-                padding = 90 - len(left_text) - len(right_text)
-                sys.stdout.write(f"\033[K{left_text}{' ' * padding}{right_text}\r\n")
-                sys.stdout.write("\033[K" + "-" * 90 + "\r\n")
-                sys.stdout.write("\033[K↑/↓: Navigate  |  Space: Select  |  a: All  |  n: None  |  q: Save\r\n")
-                sys.stdout.write("\033[K" + "─" * 90 + "\r\n")
+                # Header with rounded box style
+                sys.stdout.write("\033[K\r\n")
+                sys.stdout.write("\033[K\r\n")
+                sys.stdout.write("\033[K  ╭" + "─" * 92 + "╮\r\n")
+                sys.stdout.write("\033[K  │  \033[1m📋 Column Selection\033[0m" + " " * 72 + "│\r\n")
+                sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
+                sys.stdout.write("\033[K  │  Select columns to include in the output. " + f"Selected: {len(self.selected)}/{len(self.columns)}" + " " * (48 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
+                sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[2m↑/↓: Navigate    Space: Select    a: All    n: None    q: Save\033[0m" + " " * 28 + "│\r\n")
+                sys.stdout.write("\033[K  ╰" + "─" * 92 + "╯\r\n")
+                sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
                 
                 # Calculate window (show 20 items)
@@ -116,30 +121,24 @@ class SimpleArrowSelector:
                         # Add empty line before group (except for first item or when at start of window)
                         if i > 0 and i > start:
                             sys.stdout.write("\033[K\r\n")
-                        # Group header with bold only
-                        prefix = " > " if is_current else "   "
-                        # Use bold for group headers
-                        sys.stdout.write(f"\033[K{prefix}\033[1m{item_data}\033[0m\r\n")
+                        # Group headers are never selectable, always use same prefix
+                        # Use bold yellow for group headers to match failure_selector
+                        sys.stdout.write(f"\033[K   \033[1;33m{item_data}\033[0m\r\n")
                     else:
                         # Column
                         is_selected = item_data in self.selected
-                        # Only show arrow for current item, change based on selection state
+                        
                         if is_current:
+                            prefix = " ▶ "
+                            # Highlight current selection in cyan
+                            sys.stdout.write(f"\033[K{prefix} \033[96m{item_data}\033[0m\r\n")
+                        else:
+                            prefix = "   "
+                            # Show selected items in a different color
                             if is_selected:
-                                prefix = " ▶ "  # Solid play button for selected item
+                                sys.stdout.write(f"\033[K{prefix}   \033[92m{item_data}\033[0m\r\n")  # Green for selected
                             else:
-                                prefix = " ▷ "  # Hollow play button for unselected item
-                        else:
-                            prefix = "   "  # No arrow for non-current items
-                        # Color the column name and symbol based on selection state
-                        if is_selected:
-                            # Bright cyan for selected items (closest to #10BFCC)
-                            line_content = f"\033[96m+ {item_data}\033[0m"
-                        else:
-                            # Light gray for unselected items (better readability)
-                            line_content = f"\033[37m  {item_data}\033[0m"
-                            
-                        sys.stdout.write(f"\033[K{prefix} {line_content}\r\n")
+                                sys.stdout.write(f"\033[K{prefix}   {item_data}\r\n")
                 
                 # Show scroll indicator
                 if end < len(self.items):
@@ -161,15 +160,23 @@ class SimpleArrowSelector:
                     next_chars = sys.stdin.read(2)
                     if next_chars == '[A':  # Up
                         self.current_index = max(0, self.current_index - 1)
+                        # Skip group headers when navigating
+                        while (self.current_index > 0 and 
+                               self.items[self.current_index][0] == 'group'):
+                            self.current_index -= 1
                     elif next_chars == '[B':  # Down
                         self.current_index = min(len(self.items) - 1, self.current_index + 1)
+                        # Skip group headers when navigating
+                        while (self.current_index < len(self.items) - 1 and 
+                               self.items[self.current_index][0] == 'group'):
+                            self.current_index += 1
                     continue
                 
                 # Handle other keys
                 if key == 'q':
                     break
-                elif key == ' ':  # Space - toggle
-                    if self.items[self.current_index][0] == 'column':
+                elif key == ' ' or key == '\r' or key == '\n':  # Space or Enter - toggle
+                    if self.current_index < len(self.items) and self.items[self.current_index][0] == 'column':
                         col = self.items[self.current_index][1]
                         if col in self.selected:
                             self.selected.remove(col)
@@ -184,8 +191,16 @@ class SimpleArrowSelector:
                 elif key in ['j', 'k']:  # Vim keys
                     if key == 'j':
                         self.current_index = min(len(self.items) - 1, self.current_index + 1)
+                        # Skip group headers when navigating
+                        while (self.current_index < len(self.items) - 1 and 
+                               self.items[self.current_index][0] == 'group'):
+                            self.current_index += 1
                     else:
                         self.current_index = max(0, self.current_index - 1)
+                        # Skip group headers when navigating
+                        while (self.current_index > 0 and 
+                               self.items[self.current_index][0] == 'group'):
+                            self.current_index -= 1
                     
         finally:
             # Restore terminal

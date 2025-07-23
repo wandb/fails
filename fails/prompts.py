@@ -23,7 +23,7 @@ and identify the root causes of the failures.
 
 {EVALUATION_FAILURE_DEFINITION}
 
-### How your notes and candidate task failure categories will be used
+### How Your Notes and Candidate Task Failure Categories Will Be Used
 
 With this rough draft of failure categories and notes for 1 or a small number of rows, a later step in this pipeline \
 will subsequently compare the draft notes and candidate task failure categories across a larger number of rows. \
@@ -48,6 +48,20 @@ Some examples of open coding questions to consider when drafting the notes and c
 
 Take inspiration from the above open coding questions but there is no need to be exhaustive if its not relevant \
 to the failure data in question.
+
+## Notes on User-provided Data
+
+### Ground Truth Labels
+
+Note that for this task we assume that provided ground truth labels are correct. This is not the place to speculate \
+about the correctness of the ground truth labels.
+
+### User-provided eval reasoning
+
+Be cautious if the users eval data has provided a 'thinking', 'reasoning' or 'notes' section as part of the justification \
+for the eval decision. These 'reasons' for the eval decision might have come from a LLM and should not be treated as absolute \
+truth. You can still use any clearly correct insights from the user-provided eval reasoning, just be cautious about trusting \
+it 100%.
 """
 
 FIRST_PASS_CATEGORIZATION_PROMPT = """
@@ -82,17 +96,23 @@ their AI system.
 {evaluation_evaluation_or_scorer_data}
 </evaluation_evaluation_or_scorer_data>
 
-## Analyse
+## Analyse and Draft Notes and Candidate Task Failure Categories
 
 With the above user context and evaluation failure data, please output a draft set of notes and candidate \
 task failure categories for the given row input and row output. 
 
-### User-provided eval reasoning
+### Specificity of Candidate Task Failure Categories
 
-Be cautious if the users eval data has provided a 'thinking', 'reasoning' or 'notion' section that has come form a LLM. \
-These 'reasons' for the eval decision should not be treated as absolute truth as the LLM can still possibly be hallucinating \
-or making up reasons for the eval decision. You can still use this data, just be cautious.
+Try and be as specific as possible in your categorizations without literally incorporating every single detail of the \
+single eval failure given.
 
+### Style of Candidate Task Failure Categories
+
+Ensure that the candidate task failure categories are:
+- concise and to the point
+- lowercase
+- separated by underscores
+- no more than 5 words maximum
 """
 
 

@@ -164,3 +164,321 @@ Column Selection                                                    Selected: 4/
 ```
 
 This creates distinct zones for title, status, instructions, and content.
+
+## Weave API Usage Guide
+
+### Overview
+The Weave API is used in this project to query and filter evaluation traces. The API supports MongoDB-style query syntax for complex filtering operations. This guide documents the correct usage patterns and common pitfalls.
+
+### Key Concepts
+
+1. **Dual Filter Parameters**
+   The Weave API uses two separate parameters for filtering:
+   - `filter`: Basic filters like `op_names` and `parent_ids`
+   - `query`: Complex MongoDB-style queries using `$expr` for field-based filtering
+
+2. **Required Filter Fields**
+   When filtering evaluation children, you must include:
+   - `op_names`: The operation name(s) to filter by
+   - `parent_ids`: The parent evaluation ID(s)
+
+3. **Boolean Value Handling**
+   Boolean values in `$literal` expressions must be converted to lowercase strings:
+   - `True` → `"true"`
+   - `False` → `"false"`
+
+### Correct Filter Syntax
+
+```python
+# Example: Filter for output.scores.affiliation_score.correct == False
+calls = client.get_calls(
+    filter={
+        "op_names": ["weave:///wandb-applied-ai-team/eval-failures/op/Evaluation.predict_and_score:..."],
+        "parent_ids": ["0197a72d-2704-7ced-8c07-0fa1e0ab0557"]
+    },
+    query={
+        "$expr": {
+            "$eq": [
+                {"$getField": "output.scores.affiliation_score.correct"},
+                {"$literal": "false"}  # Note: boolean as string
+            ]
+        }
+    }
+)
+```
+
+### Implementation in weave_query.py
+
+The `query_evaluation_children` method in `fails/weave_query.py` implements this pattern:
+
+```python
+def query_evaluation_children(self, eval_id, filter_dict=None, ...):
+    # Build filter with required fields
+    api_filter = {"parent_ids": [eval_id]}
+    
+    # Get op_name from a sample child
+    sample_children = self.query_evaluation_children_helper(eval_id, limit=1)
+    if sample_children:
+        api_filter["op_names"] = [sample_children[0].op_name]
+    
+    # Build MongoDB-style query for field filtering
+    if filter_dict:
+        expr_conditions = []
+        for field, value in filter_dict.items():
+            # Convert boolean to string for $literal
+            literal_value = str(value).lower() if isinstance(value, bool) else value
+            expr_conditions.append({
+                "$eq": [
+                    {"$getField": field},
+                    {"$literal": literal_value}
+                ]
+            })
+        
+        # Use $and for multiple conditions
+        if len(expr_conditions) == 1:
+            query = {"$expr": expr_conditions[0]}
+        else:
+            query = {"$expr": {"$and": expr_conditions}}
+```
+
+### Common Pitfalls and Solutions
+
+1. **Missing op_names Filter**
+   - Problem: Filtering without `op_names` returns incorrect results
+   - Solution: Always include the operation name in the filter
+
+2. **Boolean Values Not Working**
+   - Problem: Using `{"$literal": False}` doesn't match boolean fields
+   - Solution: Convert to string: `{"$literal": "false"}`
+
+3. **Incorrect Filter Structure**
+   - Problem: Using old-style filters like `{"op": "EqOperation", "field": field, "value": value}`
+   - Solution: Use MongoDB-style `$expr` queries as shown above
+
+4. **Client-Side vs Server-Side Filtering**
+   - Server-side filtering (using Weave API) is preferred for performance
+   - Client-side filtering should only be used for complex conditions not supported by the API
+
+### MongoDB Query Operators
+
+The Weave API supports standard MongoDB query operators:
+- `$expr`: Allows field comparisons
+- `$getField`: Access nested fields using dot notation
+- `$literal`: Literal values for comparison
+- `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`: Comparison operators
+- `$and`, `$or`: Logical operators
+- `$in`, `$nin`: Array membership operators
+
+### Testing Filter Queries
+
+When debugging filter issues:
+1. First fetch unfiltered data to understand the structure
+2. Test with simple filters before complex ones
+3. Verify boolean values are strings in `$literal`
+4. Check that op_names are included in the filter
+
+### Example Usage in Pipeline
+
+In `fails/pipeline.py`, the Weave API is used to filter evaluation traces:
+
+```python
+# Configuration specifies the filter
+failure_config = {
+    "failure_column": "output.scores.affiliation_score.correct",
+    "failure_value": False
+}
+
+# WeaveQuery handles the API call with proper filter syntax
+weave_query = WeaveQuery(project_name)
+failure_traces = weave_query.query_evaluation_children(
+    eval_id=evaluation_id,
+    filter_dict={
+        failure_config["failure_column"]: failure_config["failure_value"]
+    },
+    limit=sample_limit
+)
+```
+
+This approach ensures efficient server-side filtering while maintaining compatibility with the Weave API's requirements.
+
+## Error Handling and Robustness in weave_query.py
+
+### Current Error Handling
+
+The `weave_query.py` module includes basic error handling:
+- HTTP errors are caught and re-raised with status codes
+- JSON decode errors are logged but don't stop processing
+- Missing API keys raise ValueError
+- Network timeouts are configurable
+
+### Recommended Improvements
+
+1. **Add Retry Logic for Transient Failures**
+   ```python
+   @retry_on_failure(max_retries=3, backoff_factor=1.0)
+   def _make_api_request(self, ...):
+       # Existing request logic
+   ```
+   This handles temporary network issues and server errors gracefully.
+
+2. **Custom Exception Classes**
+   - `WeaveAuthenticationError` - for 401 errors
+   - `WeaveProjectNotFoundError` - for 403 errors  
+   - `WeaveRateLimitError` - for 429 errors
+   - `WeaveNetworkError` - for connection issues
+
+3. **Connection Pooling**
+   Use `requests.Session()` for better performance:
+   ```python
+   self.session = requests.Session()
+   adapter = requests.adapters.HTTPAdapter(
+       pool_connections=10,
+       pool_maxsize=10
+   )
+   self.session.mount('https://', adapter)
+   ```
+
+4. **Graceful Degradation**
+   If server-side filtering fails, fall back to client-side:
+   ```python
+   try:
+       return query_with_filter()
+   except WeaveQueryError:
+       console.print("[yellow]Falling back to client-side filtering[/yellow]")
+       return client_side_filter(query_without_filter())
+   ```
+
+5. **Rate Limit Handling**
+   - Check for 429 status codes
+   - Extract `Retry-After` header
+   - Implement exponential backoff
+
+6. **Health Check Method**
+   ```python
+   def health_check(self) -> bool:
+       """Verify API connectivity and credentials."""
+       try:
+           self._execute_query({"project_id": "...", "limit": 1})
+           return True
+       except:
+           return False
+   ```
+
+### Error Context Best Practices
+
+1. **Include Context in Errors**
+   - Project/entity names
+   - Operation being performed
+   - Relevant parameters
+
+2. **Log Warnings for Recoverable Errors**
+   - JSON parse failures on individual lines
+   - Fallback to client-side filtering
+   - Retry attempts
+
+3. **Fail Fast for Configuration Errors**
+   - Missing API keys
+   - Invalid project/entity names
+   - Malformed queries
+
+These improvements make the Weave query module more robust and production-ready while maintaining backward compatibility.
+
+## Enhanced Filtering Capabilities in weave_query.py
+
+The `query_evaluation_children` method now supports comprehensive filtering options beyond simple boolean values. This enables powerful server-side filtering using MongoDB-style query syntax.
+
+### Supported Filter Types
+
+1. **Basic Value Filtering**
+   - **Booleans**: `{"field": False}` - Converted to lowercase strings ("true"/"false")
+   - **Floats**: `{"field": 3.14}` - Uses `$convert` to "double" for comparison
+   - **Integers**: `{"field": 42}` - Uses `$convert` to "int" for comparison
+   - **Strings**: `{"field": "value"}` - Direct comparison
+   - **Null values**: `{"field": None}` - Direct comparison
+   - **Empty strings**: `{"field": ""}` - Direct comparison
+
+2. **String Operations**
+   - **Contains**: `{"field": {"$contains": "substring"}}`
+   - **Not Contains**: `{"field": {"$not_contains": "substring"}}`
+
+3. **Comparison Operators**
+   - **Greater Than**: `{"field": {"$gt": value}}`
+   - **Greater or Equal**: `{"field": {"$gte": value}}`
+   - **Less Than**: `{"field": {"$lt": value}}`
+   - **Less or Equal**: `{"field": {"$lte": value}}`
+   - **Not Equal**: `{"field": {"$ne": value}}`
+
+4. **Array Operations**
+   - **In Array**: `{"field": {"$in": [value1, value2]}}`
+   - **Not In Array**: `{"field": {"$nin": [value1, value2]}}`
+
+5. **Existence Checks**
+   - **Field Exists**: `{"field": {"$exists": True}}`
+   - **Field Not Exists**: `{"field": {"$exists": False}}`
+
+6. **Date/Timestamp Filtering**
+   - Timestamps (started_at, ended_at) work with comparison operators without conversion
+   - Example: `{"started_at": {"$gte": 1752500000.0}}`
+
+### Usage Examples
+
+```python
+from fails.weave_query import WeaveQueryConfig, WeaveQueryClient
+
+# Create client
+config = WeaveQueryConfig(
+    wandb_entity="wandb-applied-ai-team",
+    wandb_project="eval-failures"
+)
+client = WeaveQueryClient(config)
+
+# Example 1: Filter by boolean value
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.scores.affiliation_score.correct": False}
+)
+
+# Example 2: Filter by float with greater than
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.model_latency": {"$gt": 2.0}}
+)
+
+# Example 3: Filter by string containing substring
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={"output.output.affiliation": {"$contains": "ext"}}
+)
+
+# Example 4: Complex filter with multiple conditions
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={
+        "output.scores.correct": False,
+        "output.model_latency": {"$gt": 2.0},
+        "output.status": {"$in": ["completed", "success"]},
+        "started_at": {"$gte": 1752500000.0}
+    }
+)
+
+# Example 5: Filter for null or empty values
+traces = client.query_evaluation_children(
+    evaluation_call_id="0197a72d-2704-7ced-8c07-0fa1e0ab0557",
+    filter_dict={
+        "output.error": None,  # Find traces where error is null
+        "inputs.inputs.row_output": ""  # Find traces where row_output is empty
+    }
+)
+```
+
+### Implementation Details
+
+The filtering logic automatically detects the type of each filter value and applies the appropriate MongoDB query syntax:
+
+1. **Type Detection**: The implementation checks if a value is a dict (for operators), bool, float, int, None, or string
+2. **Operator Handling**: When a dict is provided as the value, it extracts the operator and operand
+3. **Numeric Conversions**: Float and integer comparisons use `$convert` for proper type handling, except for timestamp fields
+4. **Boolean Conversion**: Boolean values are converted to lowercase strings as required by the Weave API
+5. **Multiple Conditions**: When multiple filter conditions are provided, they're combined with `$and`
+
+This enhanced filtering capability makes it much easier to query specific subsets of evaluation traces based on any combination of conditions.

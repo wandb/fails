@@ -36,7 +36,27 @@ def display_evaluation_summary(
 
     # If we have a failure filter, add info about filtered results
     if failure_config:
-        eval_info += f"\n[bold green]Failure filter:[/bold green] {failure_config['failure_column']} == {failure_config['failure_value']}"
+        # Format the filter for display
+        failure_filter = failure_config.get('failure_filter', {})
+        if '$eq' in failure_filter:
+            filter_display = f"{failure_config['failure_column']} == {failure_filter['$eq']}"
+        else:
+            # Handle other operators
+            op_key = list(failure_filter.keys())[0] if failure_filter else ''
+            op_value = failure_filter.get(op_key, '')
+            op_symbols = {
+                '$ne': '!=', '$gt': '>', '$gte': '>=', 
+                '$lt': '<', '$lte': '<=', '$contains': 'contains',
+                '$not_contains': 'does not contain', '$in': 'in', 
+                '$nin': 'not in', '$exists': 'exists' if op_value else 'does not exist'
+            }
+            op_symbol = op_symbols.get(op_key, op_key)
+            if op_key == '$exists':
+                filter_display = f"{failure_config['failure_column']} {op_symbol}"
+            else:
+                filter_display = f"{failure_config['failure_column']} {op_symbol} {op_value}"
+        
+        eval_info += f"\n[bold green]Failure filter:[/bold green] {filter_display}"
         eval_info += f"\n[bold green]Filtered children:[/bold green] {len(eval_data.get('children', []))}"
 
     console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="green"))
@@ -114,9 +134,10 @@ def prepare_trace_data_for_pipeline(
         if n_samples:
             eval_data["children"] = eval_data["children"][:n_samples]
 
-        console.print(
-            f"[dim]First child keys:[/dim] {', '.join(eval_data['children'][0].keys())}\n"
-        )
+        if debug:
+            console.print(
+                f"[dim]First child keys:[/dim] {', '.join(eval_data['children'][0].keys())}\n"
+            )
         
         if debug:
             console.print("\n[dim]CHILDREN:[/dim]")
