@@ -38,7 +38,7 @@ from fails.console import logger
 from fails.weave_query import query_evaluation_data, TraceDepth
 
 # Import the focused scorers - ARI and Category-Discovery F1
-from scorers import (
+from evaluation.fails_eval.scorers import (
     create_scorer_suite,
     get_scorer_descriptions,
     AdjustedRand,
@@ -393,7 +393,7 @@ async def run_failure_categorization_evaluation():
         print("All predictions collected. Computing dataset-level metrics...")
         
         # Import the sophisticated scoring functions
-        from scorers import _best_match_map
+        from evaluation.fails_eval.scorers import _best_match_map
         from sklearn.metrics import adjusted_rand_score
         
         # Calculate ARI score (dataset-level partition agreement)

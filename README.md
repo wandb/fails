@@ -75,13 +75,28 @@ The failure categorization system uses sophisticated dataset-level metrics that 
 ### Run Full Evaluation
 
 ```bash
-# Run dataset-level evaluation with sophisticated scoring
-cd evaluation/fails_eval  
-uv run python failure_categorization_eval.py --run_eval --debug
+# Run the main failure categorization pipeline
+uv run python fails/pipeline.py
+
+# Run meta evaluation system (evaluates the pipeline itself)  
+uv run python -m evaluation.fails_eval.failure_categorization_eval --run_eval --debug
 
 # Results logged to Weights & Biases Weave UI
 # View detailed analysis at: https://wandb.ai/wandb-applied-ai-team/eval-failures/weave
 ```
+
+### Testing
+
+```bash
+# Run pipeline test (simpler test version)
+uv run python pipe_test.py
+```
+
+### Setup Notes
+- Requires Python 3.13+ (update .python-version if needed)
+- Uses `uv` package manager for dependency management  
+- Evaluation data pulled from W&B Weave project: `wandb-applied-ai-team/eval-failures`
+- Meta evaluation uses dataset: `speaker_classification_failure_annotation:v0`
 
 ### Key Insight
 Models get **100% precision** despite zero string matches because the evaluation measures **conceptual clustering behavior**, not exact label matching. This enables proper evaluation of AI systems that naturally invent their own vocabulary.
