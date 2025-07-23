@@ -49,3 +49,39 @@ uv run python fails/pipeline.py --model "gemini/gemini-2.5-pro"
 ```
 
 The pipeline fetches evaluation data from Weave, categorizes failures, and clusters them into consistent failure categories.
+
+## Evaluation System
+
+The failure categorization system uses sophisticated dataset-level metrics that handle models **inventing new category names**. Traditional evaluation fails when models predict `"format_error"` while ground truth is `"Output-Label Format Error"` - our system recognizes these as conceptually equivalent.
+
+### How It Works
+
+#### 1. Hungarian Assignment Algorithm
+- **Groups examples** by predicted/ground truth categories  
+- **Calculates Jaccard overlap** between category clusters (not string similarity)
+- **Finds optimal 1-to-1 mapping** using Hungarian algorithm
+- **Example**: `"format_error"` → `"Org Reference Ambiguity"` because they cluster the same data points
+
+#### 2. Adjusted Rand Index (ARI)
+- **Measures partition agreement** ignoring label names
+- **Range**: -1 (opposite) to +1 (perfect clustering)
+- **Perfect for models that invent new names** but group correctly
+
+#### 3. Category-Discovery F1  
+- **Coverage**: % of ground truth categories discovered (60% in latest eval)
+- **Precision**: % of predicted categories that are valid (100% in latest eval)  
+- **F1**: Harmonic mean balancing discovery vs over-generation (75% in latest eval)
+
+### Run Full Evaluation
+
+```bash
+# Run dataset-level evaluation with sophisticated scoring
+cd evaluation/fails_eval  
+uv run python failure_categorization_eval.py --run_eval --debug
+
+# Results logged to Weights & Biases Weave UI
+# View detailed analysis at: https://wandb.ai/wandb-applied-ai-team/eval-failures/weave
+```
+
+### Key Insight
+Models get **100% precision** despite zero string matches because the evaluation measures **conceptual clustering behavior**, not exact label matching. This enables proper evaluation of AI systems that naturally invent their own vocabulary.
