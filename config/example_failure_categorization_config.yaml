@@ -1,0 +1,8 @@
+wandb-applied-ai-team/eval-failures:
+  failure_column: wb_user_id
+  failure_value: false
+  failure_categorization_columns:
+  - exception
+  - output.scores.affiliation_score
+  - inputs.self.scorers
+  - output.scores.affiliation_score.correct
