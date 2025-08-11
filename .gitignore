@@ -11,7 +11,10 @@ uv.lock
 .python-version
 speaker_classification.csv
 
-.vscode/*
+.vscode/
+
+wandb/
+reports/
 
 # Distribution / packaging
 .Python

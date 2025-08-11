@@ -15,6 +15,7 @@ from prompt_toolkit.widgets import Frame, TextArea
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import FormattedText
+from fails.cli.header import get_fails_header_for_prompt_toolkit
 
 
 class UserCancelledException(Exception):
@@ -110,20 +111,25 @@ class EvaluationSelector:
             height=3,  # Allow up to 3 lines of display
         )
         
-        # Create header text with formatted instructions  
-        header_text = FormattedText([
+        # Create header text with FAILS logo and instructions  
+        header_parts = [
+            ('', '\n\n'),  # Add 2 blank lines at the top for breathing room
+        ]
+        header_parts.extend(get_fails_header_for_prompt_toolkit())
+        header_parts.extend([
             ('', '\n'),
-            ('', 'Please provide a Weave Evaluation URL.\n'),
+            ('class:step_header', 'Step 1: Enter a Weave Evaluation URL\n'),
             ('', '\n'),
-            ('', 'The URL should look like:\n'),
+            ('', 'Please provide a Weave Evaluation URL, the URL should look like:\n'),
             ('', f'  {self.example_url}...\n'),
             ('', '\n'),
             ('class:instructions', 'Hint: Click on the evaluation row in the Evals tab in Weave, then copy the URL.\n'),
             ('', '\n'),
             ('', '─' * 105 + '\n'),
-            ('class:instructions', "Enter: Submit |  Ctrl+U: Clear |  Ctrl+C: Cancel\n"),
+            ('class:instructions', "Enter: Submit    Ctrl+U: Clear    Ctrl+C: Cancel\n"),
             ('', '─' * 105 + '\n'),
         ])
+        header_text = FormattedText(header_parts)
         
         # Create a window for error messages
         def get_error_text():
@@ -137,7 +143,7 @@ class EvaluationSelector:
         # Create the input frame with border
         input_frame = Frame(
             text_area,
-            title="Enter Evaluation URL" + (f" [{self.default_value}]" if self.default_value else ""),
+            title="The Weave Evaluation URL to analyze" + (f" [{self.default_value}]" if self.default_value else ""),
             width=105,  # Increased width for longer URLs
             height=5,  # Increased to accommodate 3 lines of text plus border
         )
@@ -150,7 +156,7 @@ class EvaluationSelector:
         
         # Create the layout
         root_container = HSplit([
-            Window(FormattedTextControl(text=header_text), height=15),
+            Window(FormattedTextControl(text=header_text), height=26),  # Increased for FAILS logo + breathing room
             Window(height=1),  # Add breathing room above the box
             left_aligned_input,
             ConditionalContainer(
@@ -229,6 +235,8 @@ class EvaluationSelector:
             'error': 'fg:red bold',
             'instructions': 'fg:#888888',  # Grey color for instructions
             'step_header': 'fg:cyan bold',  # Cyan bold for step header
+            'logo_border': 'fg:#ff00ff bold',  # Bright magenta for border
+            'logo_text': 'fg:cyan bold',  # Cyan for FAILS text
         })
         
         # Create and run the application
@@ -236,7 +244,7 @@ class EvaluationSelector:
             layout=Layout(root_container),
             key_bindings=kb,
             style=style,
-            full_screen=False,
+            full_screen=True,  # Use full screen to create a dedicated screen
             mouse_support=True,
         )
         
@@ -251,6 +259,7 @@ class EvaluationSelector:
                 print(f"    Entity: \033[96m{entity}\033[0m")
                 print(f"    Project: \033[96m{project}\033[0m")
                 print(f"    Evaluation ID: \033[96m{eval_id}\033[0m")
+                print("\n")
             else:
                 print(f"\n\033[95m✓\033[0m Valid Weave Evaluation ID extracted: \033[96m{eval_id}\033[0m")
         

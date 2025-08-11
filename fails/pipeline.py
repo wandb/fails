@@ -30,6 +30,7 @@ from fails.cli.config_selector import select_config
 from fails.cli.context_collector import collect_user_context
 from fails.cli.evaluation_selector import interactive_evaluation_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
+from fails.cli.header import get_fails_header_for_rich
 from fails.prompts import (
     CLUSTERING_PROMPT,
     CLUSTERING_SYSTEM_PROMPT,
@@ -247,7 +248,7 @@ def get_api_key_for_model(model: str) -> str:
 class Args:
     """Script arguments for the pipeline."""
 
-    model: str = "gemini/gemini-2.5-pro"
+    model: str | None = None  # Will default to LLM_MODEL env var or fallback value
     debug: bool = False
     force_eval_select: bool = False  # Force selection of evaluation URL and columns
     config_file: str = "./config/failure_categorization_config.yaml"
@@ -511,7 +512,8 @@ def save_user_context_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    console.print(f"[bright_magenta]  ✓ Saved user context to {config_file}[/bright_magenta]")
+    console.print(f"\n[bright_magenta]✓[/bright_magenta] Saved project config to: {config_file}")
+    console.print("\n")
 
 
 @weave.op
@@ -1150,7 +1152,6 @@ async def aggregate_categorizations(
     user_context: str,
     model: str,
     max_concurrent_llm_calls: int,
-    debug: bool = False,
 ) -> ClusteringCategories:
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
     async with llm_semaphore:  # Control concurrent LLM calls
@@ -1231,16 +1232,16 @@ async def run_pipeline(
 
     num_draft_categorizations = len(draft_categorization_results)
     
-    draft_spinner.stop(f"[bright_magenta]  ✓ Completed {num_draft_categorizations} draft categorizations[/bright_magenta]", success=True)
+    draft_spinner.stop(f"Completed {num_draft_categorizations} draft categorizations", success=True)
 
     # ----------------- STEP 2: Review categorizations -----------------
 
     console.print("\n[bold cyan]Step 2: Review & Clustering[/bold cyan]")
-    console.print("[bright_magenta]  Reviewing and clustering categorizations...[/bright_magenta]")
 
     # Create resclustering prompt (needed for the agent)
     draft_categorization_results_str = "\n" + "=" * 80 + "\n"
 
+    unique_candidate_categories = set()
     for c_i, draft_categorization_result in enumerate(draft_categorization_results):
         draft_categorization_results_str += f"### Evaluation Trace ID:\nTrace ID: {draft_categorization_result.trace_id}\n\n"
 
@@ -1256,6 +1257,9 @@ async def run_pipeline(
             draft_categorization_results_str += f"#### Candidate Category Name {i + 1}\n\n`{first_pass_category.category_name}`\n\n"
             draft_categorization_results_str += f"#### Category Description {i + 1}:\n\n{first_pass_category.category_description}\n\n"
             draft_categorization_results_str += f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
+            
+            unique_candidate_categories.add(first_pass_category.category_name)
+            
             if debug:
                 result_table.add_row(
                     first_pass_category.category_name,
@@ -1264,7 +1268,7 @@ async def run_pipeline(
                 )
 
         draft_categorization_results_str += "\n" + "=" * 80 + "\n"
-
+        console.print(f"[bright_magenta]  Reviewing and clustering {len(unique_candidate_categories)} candidate categories...[/bright_magenta]")
         if debug:
             console.print(
                 Panel(
@@ -1305,11 +1309,10 @@ async def run_pipeline(
         num_draft_categorizations=num_draft_categorizations,
         user_context=user_context,
         model=model,
-        debug=debug,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
     )
     
-    review_spinner.stop("[bright_magenta]  ✓ Review completed successfully![/bright_magenta]", success=True)
+    review_spinner.stop("  ✓ Review completed successfully!", success=True)
 
     if debug:
         console.print("=" * 80)
@@ -1527,26 +1530,41 @@ async def run_extract_and_classify_pipeline(
         console=console
     )
     
-    if local_filepath:
-        console.print(f"[bright_magenta]✓ Report saved to: {local_filepath}[/bright_magenta]")
-
     # Create W&B report
-    console.print("\n[cyan]Creating W&B report...[/cyan]")
-    report_url = create_wandb_report(
-        entity_name=wandb_entity,
-        project_name=wandb_project,
-        title=f"Evaluation Failures: {eval_data['evaluation'].get('display_name', eval_id)}",
-        markdown_report_text=report,
-        description=f"Failure categorization analysis for evaluation {eval_id}"
-    )
+    # report_url = create_wandb_report(
+    #     entity_name=wandb_entity,
+    #     project_name=wandb_project,
+    #     title=f"Evaluation Failures: {eval_data['evaluation'].get('display_name', eval_id)}",
+    #     markdown_report_text=report,
+    #     description=f"Failure categorization analysis for evaluation {eval_id}"
+    # )
     
-    if report_url:
-        console.print(f"[bright_magenta]✓ W&B Report created successfully![/bright_magenta]")
-        console.print(f"[bold cyan]📊 View report at: {report_url}[/bold cyan]")
-    else:
-        console.print("[dim]W&B report creation skipped (wandb-workspaces may not be installed)[/dim]")
-
-    console.print("\n[bright_magenta]✓ Pipeline completed successfully![/bright_magenta]")
+    # Display final results in an organized panel
+    console.print()  # Add spacing
+    
+    # Create content for the completion panel
+    completion_content = []
+    
+    if local_filepath:
+        completion_content.append("[bold]Local Report[/bold]")
+        completion_content.append(f"  [green]✓[/green] Saved to: [cyan]{local_filepath}[/cyan]")
+        completion_content.append("")
+    
+    # if report_url:
+    #     completion_content.append("[bold]W&B Report[/bold]")
+    #     completion_content.append("  [green]✓[/green] Published successfully")
+    #     completion_content.append(f"  📊 View at: [cyan]{report_url}[/cyan]")
+    # else:
+    #     completion_content.append("[bold]W&B Report[/bold]")
+    #     completion_content.append("  [dim]Skipped (wandb-workspaces may not be installed)[/dim]")
+    
+    # Display in a nice panel
+    console.print(Panel(
+        "\n".join(completion_content),
+        title="[bright_magenta]✓ Pipeline Completed Successfully[/bright_magenta]",
+        border_style="bright_magenta",
+        padding=(1, 2),
+    ))
 
     pipeline_result.report = report
 
@@ -1567,21 +1585,14 @@ if __name__ == "__main__":
     # Create console instance for welcome message
     console = Console()
     
-    # Print welcome message with electric pink border and cyan text
-    console.print("[bold bright_magenta]   ┌───────────────────────────────────────────────────────────────────────┐[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]███████╗ █████╗ ██╗██╗     ███████╗[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██╔════╝██╔══██╗██║██║     ██╔════╝[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]█████╗  ███████║██║██║     ███████╗[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██╔══╝  ██╔══██║██║██║     ╚════██║[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██║     ██║  ██║██║███████╗███████║[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚══════╝[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
-    console.print("[bold bright_magenta]   └───────────────────────────────────────────────────────────────────────┘[/bold bright_magenta]")
+    # Print welcome message using shared header
+    console.print(get_fails_header_for_rich())
     
     args: Args = simple_parsing.parse(Args)
+    
+    # Check for model from LLM_MODEL environment variable if not provided via CLI
+    if args.model is None:
+        args.model = os.getenv("LLM_MODEL", "gemini/gemini-2.5-pro")  # Default fallback
     
     # Check environment variables for wandb_logging_entity and wandb_logging_project if not provided via CLI
     if args.wandb_logging_entity is None:
@@ -1640,8 +1651,10 @@ if __name__ == "__main__":
         
         if config_result:
             if config_result.get('force_selection'):
-                # User chose to create new config
+                # User chose to create new config OR no configs exist
                 args.force_eval_select = True
+                if config_result.get('no_configs'):
+                    console.print()  # Add spacing before next step
             else:
                 # User selected an existing config
                 selected_config_path = config_result['filepath']
@@ -1651,13 +1664,13 @@ if __name__ == "__main__":
                 # Force evaluation selection to get the current eval ID
                 args.force_eval_select = True
         else:
-            console.print("[yellow]No configuration selected. Exiting.[/yellow]")
+            # User cancelled (pressed 'q' in the selector)
+            console.print("[yellow]Configuration selection cancelled. Exiting.[/yellow]")
             sys.exit(0)
     
     if not eval_id:
         # Interactive selection if --force_eval_select is used or forced from config selector
         if args.force_eval_select:
-            console.print("\n[bold cyan]Step 1: Enter Weave Evaluation URL[/bold cyan]")
             try:
                 result = interactive_evaluation_selection(console)
                 if not result:
@@ -1668,7 +1681,7 @@ if __name__ == "__main__":
                 if entity and project:
                     wandb_entity_extracted = entity
                     wandb_project_extracted = project
-                    console.print(f"[dim]Extracted from URL: {entity}/{project}[/dim]")
+
             except Exception as e:
                 console.print(f"[red]Error during evaluation selection: {str(e)}[/red]")
                 console.print("[yellow]Please try again with a valid evaluation URL.[/yellow]")
@@ -1712,7 +1725,6 @@ if __name__ == "__main__":
     else:
         # Collect user context interactively
         if saved_context and args.force_eval_select:
-            console.print("\n[dim]Force selection enabled - re-entering user context[/dim]")
             default_system, default_eval = saved_context
         else:
             console.print("\n[dim]No saved user context found[/dim]")
@@ -1732,34 +1744,9 @@ if __name__ == "__main__":
             config_file, final_wandb_entity, final_wandb_project,
             USER_AI_SYSTEM_CONTEXT, USER_EVAL_CONTEXT, console
         )
-    
-    # Format user context for the pipeline
-    user_context_str = f"""
-## User AI System Context
-
-What the user is trying to achieve with their AI system: 
-
-<user_ai_system_context>
-{USER_AI_SYSTEM_CONTEXT}
-</user_ai_system_context>
-
-## User Eval Context 
-
-What the user is trying to evaluate in their AI system: 
-
-<user_eval_context>
-{USER_EVAL_CONTEXT}
-</user_eval_context>
-
-"""
  
     # Update args.config_file to use our resolved config_file path
     args.config_file = config_file
-
-    if not user_context_str:
-        raise ValueError(
-            "User context is required. Please provide a user context about the AI system and what they are trying to evaluate."
-        )
 
     if args.debug:
         litellm._turn_on_debug()
@@ -1777,7 +1764,7 @@ What the user is trying to evaluate in their AI system:
     asyncio.run(
         run_extract_and_classify_pipeline(
             eval_id=eval_id,
-            user_context=user_context_str,
+            user_context="",
             debug=args.debug,
             model=model,
             max_concurrent_llm_calls=args.max_concurrent_llm_calls,

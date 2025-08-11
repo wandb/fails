@@ -410,7 +410,7 @@ class FailureColumnSelector:
         write_line("  ╭" + "─" * 92 + "╮")
         write_line("  │  \033[1;96mStep 3: Create Failure Filter\033[0m" + " " * 61 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  \033[1m3b. Operator Selection\033[0m" + " " * 67 + "│")
+        write_line("  │  \033[1m3b. Operator Selection\033[0m" + " " * 68 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Choose how to compare values for your selected column" + " " * 37 + "│")
         write_line("  │  \033[2m- You will select the value to compare against next\033[0m" + " " * 39 + "│")
@@ -621,7 +621,7 @@ class FailureColumnSelector:
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Configure the filter value for your selected column and operator." + " " * 25 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  \033[2m↑/↓: Navigate    Space: Select    b: Back\033[0m" + " " * 49 + "│")
+        write_line("  │  \033[2m↑/↓: Navigate    Enter: Select    b: Back\033[0m" + " " * 49 + "│")
         write_line("  ╰" + "─" * 92 + "╯")
         write_line()
         

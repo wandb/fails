@@ -1,24 +1,32 @@
-# fails
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/wandb/wandb/main/assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/wandb/wandb/main/assets/logo-light.svg">
+    <img src="https://raw.githubusercontent.com/wandb/wandb/main/assets/logo-light.svg" width="600" alt="Weights & Biases">
+  </picture>
+</p>
 
-A tool for analyzing evaluation failures and categorizing them automatically. The pipeline fetches evaluation data from Weave, categorizes failures, and clusters them into consistent failure categories.
+
+# FAILS
+
+***Look at your most relevant failures first***
+
+FAILS is a tool for reviewing evaluation failures and categorizing them. The pipeline fetches evaluation data from [Weave](https://weave-docs.wandb.ai/), categorizes failures, clusters them into failure categories and outputs a report with the failure clusters. The goal is not to remove the need to look at your data, but instead try and show the most impactful types of failures happening.
 
 ## Setup
 
-1. Install dependencies:
+1. Install uv:
 ```bash
-uv sync
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Set up environment variables:
+2. Add your model name to .env in [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc:
+
 ```bash
-# Create .env file
-touch .env
+LLM_MODEL=gemini/gemini-2.5-pro
 ```
 
-Add configuration to `.env`:
-
-### Required: API Keys
-Add the API key for your chosen LLM provider:
+3. Add the API key for your chosen LLM provider to `.env`:
 ```env
 # For Google/Gemini models
 GOOGLE_API_KEY=your_google_api_key_here
@@ -28,10 +36,39 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
 # For OpenAI models
 OPENAI_API_KEY=your_openai_api_key_here
+
+...
+```
+
+## Run Failure Categorization Pipeline
+
+Analyze evaluation failures and categorize them. The pipeline will ask for a Weave Evaluation URL, some context about your task, and the relevant columns that have been logged to Weave to help with the failure categorization. 
+
+```bash
+# Run with default model (Gemini 2.5 Pro)
+uv run python fails/pipeline.py
+```
+
+## Additional options
+You can adjust the pipeline settings either via the env vars in `.env` or via cli arguments:
+
+```bash
+# Debug mode (uses faster gemini-2.5-flash, limits to 5 samples)
+uv run python fails/pipeline.py --debug
+
+# Use different models
+uv run python fails/pipeline.py --model "openai/gpt-4o"
+uv run python fails/pipeline.py --model "anthropic/claude-3-5-sonnet-latest"
+uv run python fails/pipeline.py --model "gemini/gemini-2.0-flash-exp"
+
+# Limit samples and concurrency
+uv run python fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
 ```
 
 ### Optional: Pipeline Configuration
-```env
+Additional settings in the `.env` file:
+
+```bash
 # Weave logging configuration (optional)
 WANDB_LOGGING_ENTITY=your-team-name  # Optional: W&B entity for logging
 WANDB_LOGGING_PROJECT=eval-failures   # Project name for Weave logging (default: eval-failures)
@@ -46,27 +83,7 @@ MAX_CONCURRENT_LLM_CALLS=5           # Max concurrent LLM API calls (default: 20
 
 **Note:** Environment variables are overridden by CLI arguments if both are provided.
 
-## Run Failure Categorization
-
-Analyze evaluation failures and categorize them:
-
-```bash
-# Run with default model (Gemini 2.5 Pro)
-uv run python fails/pipeline.py
-
-# Debug mode (uses faster gemini-2.5-flash, limits to 5 samples)
-uv run python fails/pipeline.py --debug
-
-# Use different models
-uv run python fails/pipeline.py --model "openai/gpt-4o"
-uv run python fails/pipeline.py --model "anthropic/claude-3-5-sonnet-latest"
-uv run python fails/pipeline.py --model "gemini/gemini-2.0-flash-exp"
-
-# Limit samples and concurrency
-uv run python fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
-```
-
-## Run Evals
+## Run the pipeline eval
 
 Available evaluations in `evals/`:
 - `speaker_classification/` - Classifies speakers as internal (W&B employees) or external (prospects/users)
@@ -76,7 +93,3 @@ Run speaker classification eval:
 cd evals/speaker_classification
 uv run python speaker_classification.py
 ```
-
-### Supported Models
-
-The tool uses [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc

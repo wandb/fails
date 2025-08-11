@@ -32,23 +32,39 @@ class FailsSpinner:
         
     def _spin(self):
         """Internal method to run the spinner animation."""
+        # Add newlines before starting the spinner for breathing room
+        if not hasattr(self, '_first_frame_shown'):
+            sys.stdout.write('\n')
+            # Print the first frame with extra lines below to push content up from bottom
+            frame = next(self.spinner)
+            colored_frame = self._colorize_frame(frame)
+            sys.stdout.write(f'{colored_frame}  {self.message}...\n\n')
+            sys.stdout.flush()
+            self._first_frame_shown = True
+            
         while not self._stop_event.is_set():
             frame = next(self.spinner)
-            # Color each letter differently: F(bright_magenta) A(cyan) I(white) L(bright_magenta) S(cyan)
-            colored_frame = ""
-            for i, char in enumerate(frame):
-                if char == ' ':
-                    colored_frame += ' '
-                elif i % 4 == 0:  # F and L positions
-                    colored_frame += f'\033[95m{char}\033[0m'  # bright_magenta
-                elif i % 4 == 2:  # A and S positions  
-                    colored_frame += f'\033[96m{char}\033[0m'  # cyan
-                else:  # I position
-                    colored_frame += char  # white
+            colored_frame = self._colorize_frame(frame)
             
-            sys.stdout.write(f'\r{colored_frame}  {self.message}...')
+            # Move cursor up 2 lines, clear line, print spinner, then move back down
+            sys.stdout.write('\033[2A\r' + ' ' * 80 + '\r')  # Move up 2, clear line
+            sys.stdout.write(f'{colored_frame}  {self.message}...\n\n')
             sys.stdout.flush()
             time.sleep(0.15)  # Adjust speed as needed
+            
+    def _colorize_frame(self, frame):
+        """Helper method to colorize a spinner frame."""
+        colored_frame = ""
+        for i, char in enumerate(frame):
+            if char == ' ':
+                colored_frame += ' '
+            elif i % 4 == 0:  # F and L positions
+                colored_frame += f'\033[95m{char}\033[0m'  # bright_magenta
+            elif i % 4 == 2:  # A and S positions  
+                colored_frame += f'\033[96m{char}\033[0m'  # cyan
+            else:  # I position
+                colored_frame += char  # white
+        return colored_frame
             
     def start(self):
         """Start the spinner in a background thread."""
@@ -72,8 +88,8 @@ class FailsSpinner:
         self._stop_event.set()
         self._thread.join(timeout=1.0)
         
-        # Clear the spinner line
-        sys.stdout.write('\r' + ' ' * (len(self.frames[0]) + len(self.message) + 10) + '\r')
+        # Move cursor up 2 lines to overwrite the spinner and clear the line
+        sys.stdout.write('\033[2A\r' + ' ' * 80 + '\r')
         sys.stdout.flush()
         
         # Display final message if provided
@@ -82,6 +98,10 @@ class FailsSpinner:
                 sys.stdout.write(f'\033[95m✓\033[0m {final_message}\n')
             else:
                 sys.stdout.write(f'\033[91m✗\033[0m {final_message}\n')
+            sys.stdout.flush()
+        else:
+            # If no final message, just leave cursor at cleared line
+            sys.stdout.write('\n')
             sys.stdout.flush()
             
     def update_message(self, new_message: str):

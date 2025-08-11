@@ -63,10 +63,13 @@ class UserContextCollector:
         
         # Create header text
         header_text = FormattedText([
-            ('class:step_header', '\nStep 2: Provide Context\n'),
+            ('class:step_header', '\nStep 2: Add Context\n'),
             ('', '\n'),
-            ('', 'Please provide context about your AI system and the evaluation you have run.\n'),
-            ('', 'This helps create more specific failure categories for your evaluation.\n'),
+            ('', '- Please provide context about your AI system and the evaluations you are running.\n'),
+            ('', '- This helps create more specific failure categories for your evaluation\n'),
+            ('', '- More details can lead to better categorization.\n'),
+            ('', '\n'),
+            ('class:instructions', 'You will only have to do this once per project and you can also edit it later.\n'),
             ('', '\n'),
             ('', '─' * 105 + '\n'),
             ('class:instructions', "Tab: Switch fields    Enter: Submit    Ctrl+C: Cancel\n"),
@@ -120,7 +123,7 @@ class UserContextCollector:
         
         # Create the layout
         root_container = HSplit([
-            Window(FormattedTextControl(text=header_text), height=10),
+            Window(FormattedTextControl(text=header_text), height=13),
             left_aligned_system,
             Window(FormattedTextControl(text=system_example), height=2),
             Window(height=2),  # Spacing

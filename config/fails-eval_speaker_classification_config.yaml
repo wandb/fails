@@ -1,4 +1,6 @@
 wandb-applied-ai-team/eval-failures:
+  user_ai_system_context: My app is trying to idenify insights from transcripts of meetings between prospects and our sales team
+  user_eval_context: To classify speaker IDs from a transcript into whether they are from our company or are a customer/prospect.
   failure_column: output.scores.affiliation_score.correct
   failure_value: false
   failure_categorization_columns:

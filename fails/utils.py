@@ -24,9 +24,7 @@ def display_evaluation_summary(
         console: Rich console for output
     """
     # Build evaluation info
-    eval_info = f"""[bold cyan]Evaluation ID:[/bold cyan] {eval_data["evaluation"]["id"]}
-[bold cyan]Total traces:[/bold cyan] {eval_data["trace_count"]["total"]}
-[bold cyan]Direct children:[/bold cyan] {eval_data["trace_count"].get("direct_children", 0)}"""
+    eval_info = f"""[bold cyan]Evaluation ID:[/bold cyan] {eval_data["evaluation"]["id"]}"""
 
     # If we have a failure filter, add info about filtered results
     if failure_config:
@@ -51,7 +49,7 @@ def display_evaluation_summary(
                 filter_display = f"{failure_config['failure_column']} {op_symbol} {op_value}"
         
         eval_info += f"\n[bold cyan]Failure filter:[/bold cyan] {filter_display}"
-        eval_info += f"\n[bold cyan]Filtered children:[/bold cyan] {len(eval_data.get('children', []))}"
+        eval_info += f"\n[bold cyan]Filtered traces:[/bold cyan] {len(eval_data.get('children', []))}"
 
     console.print(Panel(eval_info, title="Evaluation Summary", border_style="white"))
 
@@ -69,7 +67,7 @@ def validate_failure_column(
     console: Console
 ) -> None:
     """
-    Validate that the failure column exists and is boolean.
+    Validate that the failure column exists in the evaluation data.
     
     Args:
         eval_data: The evaluation data dictionary
@@ -77,7 +75,7 @@ def validate_failure_column(
         console: Rich console for output
         
     Raises:
-        ValueError: If the failure column is invalid
+        ValueError: If the failure column doesn't exist
     """
     if not eval_data.get("children"):
         return
@@ -95,9 +93,7 @@ def validate_failure_column(
         
         if value is None:
             console.print(f"[red]Warning: Failure column '{failure_config['failure_column']}' not found in traces![/red]")
-        elif not isinstance(value, bool):
-            console.print(f"[red]Error: Failure column '{failure_config['failure_column']}' is not a boolean! Value: {value} (type: {type(value).__name__})[/red]")
-            raise ValueError(f"Selected failure column '{failure_config['failure_column']}' is not a boolean column")
+            raise ValueError(f"Selected failure column '{failure_config['failure_column']}' not found in traces")
     except (AttributeError, TypeError) as e:
         console.print(f"[red]Error accessing failure column: {e}[/red]")
         raise ValueError(f"Error accessing failure column '{failure_config['failure_column']}': {e}")
@@ -416,8 +412,18 @@ def generate_evaluation_report(
                     if i < min(4, len(traces) - 1):
                         report += "\n"
 
-        # Add list of all trace IDs for this category as a Python list
-        report += "\n[cyan]Linked trace IDs for this category (click to view in W&B):[/cyan]\n"
+        if idx < len(sorted_categories):
+            report += "\n"
+
+    # Add all trace ID lists at the end
+    report += "\n[bold bright_cyan]### Complete Trace ID Lists by Category:[/bold bright_cyan]\n\n"
+    report += "[dim]The following sections contain all trace IDs for each failure category, which can be used for further analysis or debugging.[/dim]\n\n"
+    
+    for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
+        traces = category_data["traces"]
+        display_name = category_name.replace("_", " ").title()
+        
+        report += f"[bold bright_magenta]{idx}. {display_name}[/bold bright_magenta] ({len(traces)} traces)\n"
         report += "[dim][\n"
         trace_ids_with_links = []
         for trace in traces:
@@ -426,9 +432,6 @@ def generate_evaluation_report(
             trace_ids_with_links.append(f'    "[link={trace_url}]{trace["trace_id"]}[/link]"')
         report += ",\n".join(trace_ids_with_links)
         report += "\n][/dim]\n\n"
-
-        if idx < len(sorted_categories):
-            report += "\n"
 
     report += "[bold bright_magenta]END REPORT[/bold bright_magenta]\n"
 

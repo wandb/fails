@@ -10,6 +10,7 @@ import termios
 from pathlib import Path
 from typing import List, Optional, Tuple
 import yaml
+from fails.cli.header import get_fails_header_for_raw_terminal
 
 
 class ConfigSelector:
@@ -38,7 +39,7 @@ class ConfigSelector:
             
         for config_file in self.config_dir.glob("*.yaml"):
             # Skip test and eval configs
-            if config_file.stem.lower().startswith(("test_", "eval_")):
+            if config_file.stem.lower().startswith(("test_", "fails-eval_")):
                 continue
                 
             try:
@@ -79,41 +80,48 @@ class ConfigSelector:
         return sorted(configs, key=lambda x: x[1]['filename'])
     
     def _clear_screen(self):
-        """Clear the terminal screen."""
-        sys.stdout.write("\033[2J\033[H")
+        """Clear from current position down."""
+        # Don't clear the entire screen, just from cursor down
+        sys.stdout.write("\033[J")
         sys.stdout.flush()
         
     def display(self):
         """Display the configuration selection interface."""
-        # Move to home position
-        sys.stdout.write("\033[H")
+        # Clear screen and move to home position
+        sys.stdout.write("\033[H\033[J")
         
-        # Header with step styling
-        sys.stdout.write("\033[K\r\n")
-        sys.stdout.write("\033[K\033[1m\033[96mSelect Evaluation Configuration \033[0m\r\n")
-        sys.stdout.write("\033[K\r\n")
+        # Add breathing room at the top
+        sys.stdout.write("\r\n\r\n")
+        
+        # Print FAILS header using shared module
+        sys.stdout.write(get_fails_header_for_raw_terminal())
+        sys.stdout.write("\r\n")
+        
+        # Configuration selector header
+        sys.stdout.write("\033[1m\033[96mSelect Evaluation Configuration \033[0m\r\n")
+        sys.stdout.write("\r\n")
         
         if not self.configs:
-            sys.stdout.write("\033[K\033[91mNo configuration files found in ./config/\033[0m\r\n")
-            sys.stdout.write("\033[K\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
+            sys.stdout.write("\033[91mNo configuration files found in ./config/\033[0m\r\n")
+            sys.stdout.write("\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
         else:
-            sys.stdout.write(f"\033[KFound \033[95m{len(self.configs)}\033[0m evaluation configuration(s), please select one or create a new configuration:\r\n")
-            sys.stdout.write("\033[K\r\n")
+            sys.stdout.write(f"Found \033[95m{len(self.configs)}\033[0m evaluation config(s), please select one or create a new config:\r\n")
+            sys.stdout.write("\r\n")
 
             # Instructions (matching other selectors' style)
-            sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
-            sys.stdout.write("\033[K\033[2m↑/↓: Navigate    Enter: Select    q: Quit    n: New config\033[0m\r\n")
-            sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
-            sys.stdout.write("\033[K\r\n")
+            sys.stdout.write("\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
+            sys.stdout.write("\033[2m↑/↓: Navigate    Enter: Select    q: Quit    n: New config\033[0m\r\n")
+            sys.stdout.write("\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
+            sys.stdout.write("\r\n")
 
             # Display each config
-            for i, (filepath, info) in enumerate(self.configs):
+            for i, (_, info) in enumerate(self.configs):  # _ to ignore unused filepath
                 is_current = i == self.current_index
                 
                 if is_current:
                     # Highlight current selection in cyan
                     prefix = " \033[96m▶\033[0m "
-                    sys.stdout.write(f"\033[K{prefix} \033[96m{info['entity']}/{info['project']}\033[0m\r\n")
+                    sys.stdout.write(f"{prefix} \033[96m{info['entity']}/{info['project']}\033[0m\r\n")
                     
                     # Show details for selected config (indented)
                     if info['data']:
@@ -124,18 +132,16 @@ class ConfigSelector:
                             
                             if 'selected_columns' in config_details:
                                 cols = config_details['selected_columns']
-                                sys.stdout.write(f"\033[K     \033[2mColumns: {len(cols)} selected\033[0m\r\n")
+                                sys.stdout.write(f"     \033[2mColumns: {len(cols)} selected\033[0m\r\n")
                             
                             if 'failure_column' in config_details:
-                                sys.stdout.write(f"\033[K     \033[2mFailure column name: {config_details['failure_column']}\033[0m\r\n")
+                                sys.stdout.write(f"     \033[2mFailure column name: {config_details['failure_column']}\033[0m\r\n")
                 else:
                     prefix = "   "
-                    sys.stdout.write(f"\033[K{prefix} {info['entity']}/{info['project']}\r\n")
+                    sys.stdout.write(f"{prefix} {info['entity']}/{info['project']}\r\n")
             
-            sys.stdout.write("\033[K\r\n")
+            sys.stdout.write("\r\n")
         
-        # Clear any remaining lines
-        sys.stdout.write("\033[J")
         sys.stdout.flush()
         
     def run(self) -> Optional[dict]:
@@ -145,11 +151,11 @@ class ConfigSelector:
             Selected configuration info dict or None if cancelled/no configs
         """
         if not self.configs:
-            # No configs available, show message and return None
+            # No configs available, return signal to create new config
             self._clear_screen()
             self.display()
-            print("\n\033[93mExiting. Please run with --force-eval-select to set up a new configuration.\033[0m")
-            return None
+            print("\n\033[93mNo saved configurations found. Starting new configuration setup...\033[0m")
+            return {'force_selection': True, 'no_configs': True}
             
         # Save terminal settings
         fd = sys.stdin.fileno()
@@ -198,7 +204,7 @@ class ConfigSelector:
         finally:
             # Restore terminal
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-            sys.stdout.write("\033[?25h\033[?1049l")
+            sys.stdout.write("\033[?25h\033[?1049l")  # Show cursor and exit alternate screen
             sys.stdout.flush()
 
 
