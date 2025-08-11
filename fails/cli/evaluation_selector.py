@@ -120,9 +120,9 @@ class EvaluationSelector:
             ('', '\n'),
             ('class:instructions', 'Hint: Click on the Evaluation row in the Evals tab, then copy the URL.\n'),
             ('', '\n'),
-            ('', '---------------------------------------------------------------------------\n'),
+            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
             ('class:instructions', "Type 'q' to quit |  Enter to submit |  Ctrl+U to clear |  Ctrl+C to cancel\n"),
-            ('', '---------------------------------------------------------------------------\n'),
+            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
         ])
         
         # Create a window for error messages
@@ -138,7 +138,7 @@ class EvaluationSelector:
         input_frame = Frame(
             text_area,
             title="Enter Evaluation URL" + (f" [{self.default_value}]" if self.default_value else ""),
-            width=75,  # Increased width for longer URLs
+            width=105,  # Increased width for longer URLs
             height=5,  # Increased to accommodate 3 lines of text plus border
         )
         

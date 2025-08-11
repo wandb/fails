@@ -22,6 +22,7 @@ from rich.table import Table
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fails.cli.column_context_selector import simple_arrow_selection
 from fails.cli.config_selector import select_config
+from fails.cli.context_collector import collect_user_context
 from fails.cli.evaluation_selector import interactive_evaluation_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
@@ -268,6 +269,99 @@ def load_failure_column_preferences(
 
 
 @weave.op
+def load_user_context_preferences(
+    config_file: str, wandb_entity: str, wandb_project: str
+) -> Optional[Tuple[str, str]]:
+    """
+    Load user context preferences for a specific project from config file.
+
+    Args:
+        config_file: Path to the config file
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+
+    Returns:
+        Tuple of (system_context, eval_context) if preferences exist, None otherwise
+    """
+    config_path = Path(config_file)
+
+    if not config_path.exists():
+        return None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+
+        # Look for project-specific config
+        project_key = f"{wandb_entity}/{wandb_project}"
+
+        if (
+            config
+            and project_key in config
+            and "user_ai_system_context" in config[project_key]
+            and "user_eval_context" in config[project_key]
+        ):
+            return (
+                config[project_key]["user_ai_system_context"],
+                config[project_key]["user_eval_context"]
+            )
+
+        return None
+
+    except (yaml.YAMLError, KeyError) as e:
+        print(f"[yellow]Warning: Error reading config file: {e}[/yellow]")
+        return None
+
+
+@weave.op
+def save_user_context_preferences(
+    config_file: str, wandb_entity: str, wandb_project: str, 
+    system_context: str, eval_context: str, console: Console
+) -> None:
+    """
+    Save user context preferences for a specific project to config file.
+
+    Args:
+        config_file: Path to the config file
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+        system_context: AI system context
+        eval_context: Evaluation context
+        console: Rich console instance
+    """
+    config_path = Path(config_file)
+
+    # Ensure directory exists
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing config or create new
+    config = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            print(
+                "[yellow]Warning: Existing config file is invalid, creating new one[/yellow]"
+            )
+            config = {}
+
+    # Update with new preferences
+    project_key = f"{wandb_entity}/{wandb_project}"
+    if project_key not in config:
+        config[project_key] = {}
+
+    config[project_key]["user_ai_system_context"] = system_context
+    config[project_key]["user_eval_context"] = eval_context
+
+    # Save config as YAML
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    console.print(f"[bright_magenta]  ✓ Saved user context to {config_file}[/bright_magenta]")
+
+
+@weave.op
 def save_failure_column_preferences(
     config_file: str,
     wandb_entity: str,
@@ -354,7 +448,7 @@ def get_column_preferences(
         - columns_list: List of column names for data extraction
     """
     # First, handle failure column selection
-    console.print("\n[bold cyan]Step 2: Select Failure Filter[/bold cyan]")
+    console.print("\n[bold cyan]Step 3: Select Failure Filter[/bold cyan]")
 
     # Get all available columns first
     column_info = get_available_columns(
@@ -538,7 +632,7 @@ def get_column_preferences(
 
     else:
         # Perform column selection
-        console.print("\n[bold cyan]Step 3: Select Context Columns[/bold cyan]")
+        console.print("\n[bold cyan]Step 4: Select Context Columns[/bold cyan]")
 
         if debug:
             if saved_columns and force_eval_select:
@@ -1418,13 +1512,54 @@ if __name__ == "__main__":
     else:
         model = args.model
 
-    # User AI System Context
-    USER_AI_SYSTEM_CONTEXT = """My app is trying to idenify insights from transcripts of \
-meetings between prospects and our sales team."""
-
-    USER_EVAL_CONTEXT = """To classify speaker IDs from a transcript into whether they \
-are from our company or are a customer/prospect."""
-
+    # Use extracted entity/project if available, otherwise use args
+    final_wandb_entity = wandb_entity_extracted or args.wandb_entity
+    final_wandb_project = wandb_project_extracted or args.wandb_project
+    
+    # Validate that we have entity and project
+    if not final_wandb_entity or not final_wandb_project:
+        console.print("[red]Error: W&B entity and project are required.[/red]")
+        console.print("[yellow]These should be extracted from the evaluation URL or provided via --wandb-entity and --wandb-project[/yellow]")
+        sys.exit(1)
+    
+    # Use selected config path if available, otherwise construct from entity/project
+    if selected_config_path:
+        config_file = selected_config_path
+    else:
+        config_file = f"./config/{final_wandb_entity}_{final_wandb_project}_config.yaml"
+    
+    # Step 2: Collect or load user context
+    saved_context = load_user_context_preferences(config_file, final_wandb_entity, final_wandb_project)
+    
+    if saved_context and not args.force_eval_select:
+        # Use saved user context
+        USER_AI_SYSTEM_CONTEXT, USER_EVAL_CONTEXT = saved_context
+        console.print("\n[dim]Using saved user context from configuration[/dim]")
+    else:
+        # Collect user context interactively
+        if saved_context and args.force_eval_select:
+            console.print("\n[dim]Force selection enabled - re-entering user context[/dim]")
+            default_system, default_eval = saved_context
+        else:
+            console.print("\n[dim]No saved user context found[/dim]")
+            default_system, default_eval = None, None
+        
+        # Run the context collector
+        context_result = collect_user_context(default_system, default_eval)
+        
+        if not context_result:
+            console.print("[red]User context collection cancelled. Exiting.[/red]")
+            sys.exit(1)
+        
+        USER_AI_SYSTEM_CONTEXT, USER_EVAL_CONTEXT = context_result
+        
+        # Save the user context
+        save_user_context_preferences(
+            config_file, final_wandb_entity, final_wandb_project,
+            USER_AI_SYSTEM_CONTEXT, USER_EVAL_CONTEXT, console
+        )
+    
+    # Format user context for the pipeline
     user_context_str = f"""
 ## User AI System Context
 
@@ -1443,23 +1578,9 @@ What the user is trying to evaluate in their AI system:
 </user_eval_context>
 
 """
-
-
-    # Use extracted entity/project if available, otherwise use args
-    final_wandb_entity = wandb_entity_extracted or args.wandb_entity
-    final_wandb_project = wandb_project_extracted or args.wandb_project
     
-    # Validate that we have entity and project
-    if not final_wandb_entity or not final_wandb_project:
-        console.print("[red]Error: W&B entity and project are required.[/red]")
-        console.print("[yellow]These should be extracted from the evaluation URL or provided via --wandb-entity and --wandb-project[/yellow]")
-        sys.exit(1)
-    
-    # Use selected config path if available, otherwise construct from entity/project
-    if selected_config_path:
-        args.config_file = selected_config_path
-    else:
-        args.config_file = f"./config/{final_wandb_entity}_{final_wandb_project}_config.yaml"
+    # Update args.config_file to use our resolved config_file path
+    args.config_file = config_file
 
     if not user_context_str:
         raise ValueError(

@@ -1,6 +1,134 @@
 # CLAUDE.md - Project Knowledge Base
 
-## Terminal UI Arrow Selector Implementation
+## UI/UX Style Guide
+
+### Color Scheme
+The Fails project uses a consistent color scheme across all terminal interfaces for visual hierarchy and clarity:
+
+#### Primary Colors
+- **Bright Cyan** (`\033[96m` or `[bright_cyan]`): 
+  - Step headers and navigation (e.g., "Step 1: Enter Weave Evaluation URL")
+  - Selected items in terminal selectors
+  - Important column/field values
+  - Panel borders for main content
+
+- **Bright Magenta** (`\033[95m` or `[bright_magenta]`):
+  - Success indicators (always with space: `✓ ` not `✓`)
+  - Completion messages
+  - Positive outcomes
+  - The FAILS logo border
+  - Group headers in selectors (bold)
+
+- **Yellow** (`[yellow]`):
+  - Warnings and important notices
+  - Configuration changes
+  - Error recovery suggestions
+
+#### Secondary Colors
+- **Grey/Dim** (`[dim]` or `\033[2m`):
+  - Meta information (timestamps, IDs)
+  - Keyboard shortcuts and instructions
+  - "Using saved preferences" type messages
+  - Less important status updates
+  - File paths in informational messages
+
+- **Green** (not bright) (`[green]`):
+  - File save confirmations (path portion)
+  - Subtle positive states
+  - Secondary confirmations
+
+- **White** (default):
+  - Main content text
+  - User data
+  - Primary information
+
+### Visual Hierarchy
+```
+1. bright_magenta - Success/completion (demands attention)
+2. bright_cyan - Current step/actions (guides flow)  
+3. yellow - Warnings/changes (needs awareness)
+4. white - Main content (default reading)
+5. green - Confirmations/saves (subtle positive)
+6. dim/grey - Supporting info (optional reading)
+```
+
+### UI Patterns
+
+#### Success Messages
+Always format with space after checkmark and bright_magenta:
+```python
+# Good
+console.print("[bright_magenta]✓ Task completed successfully![/bright_magenta]")
+
+# Bad
+console.print("[green]✓Task completed[/green]")
+```
+
+#### File Operations
+Split checkmark and path with different colors:
+```python
+# Good
+console.print(f"[bright_magenta]✓[/bright_magenta] [green]Saved to {filepath}[/green]")
+
+# Bad  
+console.print(f"[bright_magenta]✓ Saved to {filepath}[/bright_magenta]")
+```
+
+#### Step Headers
+Use Panels with cyan borders for pipeline steps:
+```python
+console.print(
+    Panel(
+        "Starting task description...",
+        title="Step 1: Task Name",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+)
+```
+
+#### Interactive Selection Headers
+Bold cyan for interactive step headers:
+```python
+console.print("\n[bold cyan]Step 1: Enter Weave Evaluation URL[/bold cyan]")
+```
+
+#### Status Messages
+Use dim for less important status updates:
+```python
+# Good
+console.print("[dim]Fetching evaluation trace...[/dim]")
+console.print("[dim]Using discovered columns for selection...[/dim]")
+
+# Bad
+console.print("Fetching evaluation trace...")
+```
+
+### Terminal UI Consistency
+
+#### Step Numbering
+Main flow uses consistent numbering:
+- Step 1: Enter Weave Evaluation URL
+- Step 2: Select Failure Filter (with sub-steps 2a, 2b, 2c)
+- Step 3: Select Context Columns
+
+#### Box Styles
+- Use rounded boxes (`╭─╮`) for raw terminal UIs
+- Use Rich Panels for reports and summaries
+- Consistent padding and alignment
+
+#### Text Alignment
+- Success indicators: Left-aligned with 2-space indent
+- Headers: Centered in boxes where appropriate
+- Instructions: Grey/dim text at bottom of boxes
+
+## Terminal UI Development Guide
+
+This project has three main TUI implementations:
+1. **Raw terminal mode selectors** (`column_context_selector.py`, `failure_selector.py`) - Arrow-based selection
+2. **prompt_toolkit implementation** (`evaluation_selector.py`) - Modern bordered input with paste protection
+
+## Terminal UI Arrow Selector Implementation (Raw Mode)
 
 ### Problem
 Creating a working arrow-based selector for terminal UI that doesn't result in garbled/overlapping text. The initial attempts resulted in broken displays where text was overlapping and newlines weren't being handled correctly.
@@ -98,6 +226,228 @@ finally:
 6. Flush output after writes for immediate display
 
 This approach creates a clean, flicker-free terminal UI that works across different terminal emulators.
+
+## prompt_toolkit Implementation (Modern Approach)
+
+### Why prompt_toolkit?
+
+During development of the evaluation_selector.py, we encountered severe issues with raw terminal mode when handling large paste operations:
+
+1. **Terminal Freezing**: Large pastes (>500 chars) would freeze the terminal and crash the IDE
+2. **Escape Sequence Leakage**: Bracketed paste end sequences (`[201~`) would leak into user input
+3. **Repeated Error Messages**: Large pastes were processed in chunks, each triggering separate errors
+4. **Poor User Experience**: No visual feedback during paste rejection
+
+### The prompt_toolkit Solution
+
+prompt_toolkit provides a robust framework that handles all these edge cases automatically:
+
+```python
+from prompt_toolkit import Application
+from prompt_toolkit.widgets import Frame, TextArea
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.formatted_text import FormattedText
+```
+
+### Key Features Implemented
+
+1. **Automatic Paste Handling**
+   - prompt_toolkit handles bracketed paste mode automatically
+   - No manual escape sequence consumption needed
+   - Clean rejection of oversized pastes without terminal artifacts
+
+2. **Bordered Input Box**
+   ```python
+   input_frame = Frame(
+       text_area,
+       title="Enter ID/URL",
+       width=75,  # Fixed width
+       height=5,  # Fixed height
+   )
+   ```
+
+3. **Multi-line Text Area with Wrapping**
+   ```python
+   text_area = TextArea(
+       multiline=True,   # Allow multiline display
+       wrap_lines=True,  # Wrap long lines
+       height=3,         # Display up to 3 lines
+   )
+   ```
+
+4. **Real-time Input Validation**
+   ```python
+   def on_text_changed(_):
+       if len(text_area.text) > MAX_INPUT_SIZE:
+           text_area.text = ""  # Clear immediately
+           self.error_message = "❌ Input too long..."
+   
+   text_area.buffer.on_text_changed += on_text_changed
+   ```
+
+5. **Styled Text with FormattedText**
+   ```python
+   header_text = FormattedText([
+       ('', 'Normal text\n'),
+       ('class:instructions', 'Grey instruction text\n'),
+   ])
+   
+   style = Style.from_dict({
+       'instructions': 'fg:#888888',  # Grey color
+       'error': 'fg:red bold',
+   })
+   ```
+
+6. **Left-aligned Layout with VSplit**
+   ```python
+   # Left-align a fixed-width frame
+   left_aligned_input = VSplit([
+       input_frame,      # Fixed width component
+       Window(),         # Expands to fill remaining space
+   ])
+   ```
+
+### Layout Best Practices
+
+1. **Use HSplit for Vertical Stacking**
+   ```python
+   root_container = HSplit([
+       Window(header_control, height=14),  # Fixed height header
+       Window(height=1),                    # Breathing room
+       left_aligned_input,                  # Input area
+       error_window,                        # Conditional error display
+   ])
+   ```
+
+2. **Conditional Containers**
+   ```python
+   ConditionalContainer(
+       Window(error_control, height=3),
+       filter=Condition(lambda: bool(self.error_message))
+   )
+   ```
+   Only shows the error window when there's an error message.
+
+3. **FormattedTextControl vs Label**
+   - Use `FormattedTextControl` for dynamic text that changes
+   - Wrap it in a `Window` for proper display
+   - Avoid using `Label` widget with lambda functions (causes 'reset' errors)
+
+### Key Differences from Raw Terminal Mode
+
+| Aspect | Raw Terminal Mode | prompt_toolkit |
+|--------|------------------|----------------|
+| **Paste Handling** | Manual escape sequence parsing | Automatic |
+| **Input Validation** | Complex state management | Event-driven callbacks |
+| **Layout** | Manual positioning with ANSI codes | Declarative container system |
+| **Styling** | ANSI escape sequences | CSS-like style dictionaries |
+| **Text Wrapping** | Manual calculation | Built-in support |
+| **Scrolling** | Manual implementation | Automatic with scrollbar option |
+| **Mouse Support** | Manual escape sequence handling | Built-in with `mouse_support=True` |
+
+### When to Use Each Approach
+
+**Use Raw Terminal Mode when:**
+- Building simple selection interfaces
+- Need minimal dependencies
+- Want full control over every pixel
+- Performance is critical
+- Examples: column_context_selector.py, failure_selector.py
+
+**Use prompt_toolkit when:**
+- Handling text input from users
+- Need robust paste protection
+- Want professional-looking borders and styling
+- Building complex forms or dialogs
+- Need mouse support
+- Example: evaluation_selector.py
+
+### Common Pitfalls and Solutions
+
+1. **Problem: AttributeError: 'Label' object has no attribute 'reset'**
+   - Cause: Using Label widget with dynamic text function
+   - Solution: Use FormattedTextControl instead:
+   ```python
+   # Wrong
+   Label(lambda: self.error_message)
+   
+   # Right
+   FormattedTextControl(text=lambda: self.error_message)
+   ```
+
+2. **Problem: Frame border extends full width while content is narrower**
+   - Cause: Frame naturally expands to fill available space
+   - Solution: Wrap in VSplit with empty Window:
+   ```python
+   VSplit([
+       Frame(..., width=75),  # Fixed width
+       Window(),              # Fills remaining space
+   ])
+   ```
+
+3. **Problem: No breathing room between UI elements**
+   - Solution: Add empty Windows with fixed height:
+   ```python
+   HSplit([
+       header_window,
+       Window(height=1),  # Breathing room
+       input_frame,
+   ])
+   ```
+
+### Testing Paste Protection
+
+To test paste protection robustly:
+
+1. Generate large test data:
+   ```bash
+   python -c "print('x' * 1000)" | pbcopy  # macOS
+   python -c "print('x' * 1000)" | xclip   # Linux
+   ```
+
+2. Test scenarios:
+   - Paste data larger than MAX_INPUT_SIZE
+   - Paste multi-line content
+   - Paste binary or special characters
+   - Rapid repeated pastes
+
+3. Expected behavior:
+   - Input clears immediately
+   - Single error message appears
+   - No terminal artifacts or escape sequences
+   - Terminal remains responsive
+
+### Key Takeaways from TUI Development
+
+1. **Always Test Edge Cases**
+   - Large paste operations can break raw terminal input
+   - Escape sequences need complete consumption
+   - Different terminals behave differently
+
+2. **Choose the Right Tool**
+   - Raw terminal mode: Great for simple navigation
+   - prompt_toolkit: Essential for text input and complex UIs
+   - Rich: Excellent for styled output but limited for input
+
+3. **User Experience Matters**
+   - Clear visual feedback for all actions
+   - Proper error messages without terminal artifacts
+   - Consistent keyboard shortcuts across all selectors
+   - Professional appearance with borders and proper alignment
+
+4. **Robustness Requirements**
+   - Handle paste operations gracefully
+   - Prevent terminal freezing at all costs
+   - Clean up terminal state in finally blocks
+   - Test with various terminal emulators
+
+5. **Visual Design Consistency**
+   - Use the same symbols across all selectors (▶ for cursor, ✓ for selected)
+   - Consistent color scheme (cyan for highlights, grey for instructions)
+   - Group related items with headers
+   - Provide breathing room between sections
 
 ## Additional Terminal UI Best Practices
 

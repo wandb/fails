@@ -85,7 +85,7 @@ class SimpleArrowSelector:
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K  ╭" + "─" * 92 + "╮\r\n")
-                sys.stdout.write("\033[K  │  \033[1;96mStep 3: Select Context Columns\033[0m" + " " * 61 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[1;96mStep 4: Select Context Columns\033[0m" + " " * 61 + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
                 sys.stdout.write("\033[K  │  Select columns to include in the output. " + f"Selected: {len(self.selected)}/{len(self.columns)}" + " " * (48 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
@@ -232,7 +232,7 @@ def simple_arrow_selection(
     """
     # Show initial message
     console.print(Panel(
-        "[bold cyan]Step 3: Select Context Columns[/bold cyan]\n\n"
+        "[bold cyan]Step 4: Select Context Columns[/bold cyan]\n\n"
         "Starting arrow key selector...\n"
         "[dim]Use ↑/↓ to navigate, Space to toggle[/dim]",
         border_style="cyan"

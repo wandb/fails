@@ -38,8 +38,8 @@ class ConfigSelector:
             return configs
             
         for config_file in self.config_dir.glob("*.yaml"):
-            # Skip test configs
-            if "test" in config_file.name.lower():
+            # Skip test and eval configs
+            if config_file.stem.lower().startswith(("test_", "eval_")):
                 continue
                 
             try:
@@ -90,16 +90,24 @@ class ConfigSelector:
         sys.stdout.write("\033[H")
         
         # Header with step styling
-        sys.stdout.write("\033[K\033[1m\033[96mSelect Configuration\033[0m\r\n")
+        sys.stdout.write("\033[K\r\n")
+        sys.stdout.write("\033[K\033[1m\033[96mSelect Evaluation Configuration \033[0m\r\n")
         sys.stdout.write("\033[K\r\n")
         
         if not self.configs:
             sys.stdout.write("\033[K\033[91mNo configuration files found in ./config/\033[0m\r\n")
             sys.stdout.write("\033[K\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
         else:
-            sys.stdout.write("\033[K\033[2mFound {} configuration(s):\033[0m\r\n".format(len(self.configs)))
+            sys.stdout.write(f"\033[K\033[2mFound {len(self.configs)} evaluation configuration(s), please select one based \
+on the W&B entity and project:\033[0m\r\n")
             sys.stdout.write("\033[K\r\n")
-            
+
+            # Instructions (matching other selectors' style)
+            sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
+            sys.stdout.write("\033[K\033[2m↑/↓ Navigate | Enter Select | q Quit | n New Config\033[0m\r\n")
+            sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
+            sys.stdout.write("\033[K\r\n")
+
             # Display each config
             for i, (filepath, info) in enumerate(self.configs):
                 is_current = i == self.current_index
@@ -121,17 +129,12 @@ class ConfigSelector:
                                 sys.stdout.write(f"\033[K     \033[2mColumns: {len(cols)} selected\033[0m\r\n")
                             
                             if 'failure_column' in config_details:
-                                sys.stdout.write(f"\033[K     \033[2mFailure: {config_details['failure_column']}\033[0m\r\n")
+                                sys.stdout.write(f"\033[K     \033[2mFailure column name: {config_details['failure_column']}\033[0m\r\n")
                 else:
                     prefix = "   "
                     sys.stdout.write(f"\033[K{prefix} {info['entity']}/{info['project']}\r\n")
             
             sys.stdout.write("\033[K\r\n")
-            
-            # Instructions (matching other selectors' style)
-            sys.stdout.write("\033[K\033[2m──────────────────────────────────────────────────\033[0m\r\n")
-            sys.stdout.write("\033[K\033[2m↑/↓ Navigate | Enter Select | q Quit | n New Config\033[0m\r\n")
-            sys.stdout.write("\033[K\033[2m──────────────────────────────────────────────────\033[0m\r\n")
         
         # Clear any remaining lines
         sys.stdout.write("\033[J")
@@ -159,8 +162,8 @@ class ConfigSelector:
             sys.stdout.write("\033[?1049h\033[?25l")
             sys.stdout.flush()
             
-            # Set terminal to raw mode
-            tty.setraw(fd)
+            # Set terminal to raw mode (use direct fileno call for better compatibility)
+            tty.setraw(sys.stdin.fileno())
             
             # Initial clear of the alternate screen
             sys.stdout.write("\033[2J\033[H")
@@ -174,10 +177,11 @@ class ConfigSelector:
                 
                 if key == '\x1b':  # Escape sequence
                     seq = sys.stdin.read(2)
-                    if seq == '[A':  # Up arrow
+                    # Handle both bracket and O formats for arrow keys (zsh/iTerm compatibility)
+                    if seq == '[A' or seq == 'OA':  # Up arrow (both formats)
                         if self.current_index > 0:
                             self.current_index -= 1
-                    elif seq == '[B':  # Down arrow
+                    elif seq == '[B' or seq == 'OB':  # Down arrow (both formats)
                         if self.current_index < len(self.configs) - 1:
                             self.current_index += 1
                             

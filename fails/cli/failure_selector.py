@@ -278,12 +278,12 @@ class FailureColumnSelector:
         write_line("  ╭" + "─" * 92 + "╮")
         write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  \033[1m🔍 2a. Column Selection\033[0m" + " " * 67 + "│")
+        write_line("  │  \033[1m🔍 3a. Column Selection\033[0m" + " " * 67 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Select the 1 column that indicates there was an evaluation failure." + " " * 23 + "│")
         write_line("  │  - This should correspond to a column name in your Weave traces table in the app." + " " * 10 + "│")
         write_line("  │  - This could be a boolean, numeric or string column like 'is_correct' or 'score' etc." + " " * 5 + "│")
-        write_line("  │  - The error categorization will use this column to find the failures to focus on." + " " * 9 + "│")
+        write_line("  │  - The failure categorization will use this column to find the failures to focus on." + " " * 9 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  \033[2m↑/↓: Navigate    Space: Select    q: Cancel\033[0m" + " " * 47 + "│")
         write_line("  ╰" + "─" * 92 + "╯")
@@ -408,7 +408,7 @@ class FailureColumnSelector:
         write_line("  ╭" + "─" * 92 + "╮")
         write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  \033[1m⚙️  2b. Operator Selection\033[0m" + " " * 65 + "│")
+        write_line("  │  \033[1m⚙️  3b. Operator Selection\033[0m" + " " * 65 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Choose how to compare values for your selected column" + " " * 37 + "│")
         write_line("  │  - You will select the value to compare against next" + " " * 39 + "│")
@@ -613,7 +613,7 @@ class FailureColumnSelector:
         write_line("  ╭" + "─" * 92 + "╮")
         write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  \033[1m📝 2c. Value Input\033[0m" + " " * 72 + "│")
+        write_line("  │  \033[1m📝 3c. Value Input\033[0m" + " " * 72 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Configure the filter value for your selected column and operator." + " " * 25 + "│")
         write_line("  │" + " " * 92 + "│")
@@ -763,9 +763,9 @@ def interactive_failure_column_selection(
         "[bold cyan]Step 2: Select Failure Filter[/bold cyan]\n\n"
         "Select a column and condition to filter failed evaluations.\n\n"
         "[dim]This step has 3 parts:\n"
-        "2a. Select the column\n"
-        "2b. Choose the operator (equals, greater than, contains, etc.)\n"
-        "2c. Enter the value[/dim]",
+        "3a. Select the column\n"
+        "3b. Choose the operator (equals, greater than, contains, etc.)\n"
+        "3c. Enter the value[/dim]",
         border_style="cyan"
     ))
     
