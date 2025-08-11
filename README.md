@@ -15,7 +15,10 @@ uv sync
 touch .env
 ```
 
-Add API keys to `.env` (only the key for your chosen provider is required):
+Add configuration to `.env`:
+
+### Required: API Keys
+Add the API key for your chosen LLM provider:
 ```env
 # For Google/Gemini models
 GOOGLE_API_KEY=your_google_api_key_here
@@ -26,6 +29,22 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 # For OpenAI models
 OPENAI_API_KEY=your_openai_api_key_here
 ```
+
+### Optional: Pipeline Configuration
+```env
+# Weave logging configuration (optional)
+WANDB_LOGGING_ENTITY=your-team-name  # Optional: W&B entity for logging
+WANDB_LOGGING_PROJECT=eval-failures   # Project name for Weave logging (default: eval-failures)
+
+# Model configuration (optional)
+MODEL=gemini/gemini-2.5-pro          # LLM model to use (default: gemini/gemini-2.5-pro)
+
+# Processing configuration (optional)
+N_SAMPLES=10                         # Number of samples to process (default: all)
+MAX_CONCURRENT_LLM_CALLS=5           # Max concurrent LLM API calls (default: 20)
+```
+
+**Note:** Environment variables are overridden by CLI arguments if both are provided.
 
 ## Run Failure Categorization
 

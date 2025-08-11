@@ -69,7 +69,7 @@ class UserContextCollector:
             ('class:instructions', 'This helps the pipeline better understand and categorize your failures.\n'),
             ('', '\n'),
             ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
-            ('class:instructions', "Tab to switch fields | Enter to submit | Ctrl+C to cancel\n"),
+            ('class:instructions', "Tab: to switch fields | Enter: submit | Ctrl+C: cancel\n"),
             ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
             ('', '\n'),
         ])

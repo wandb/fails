@@ -283,7 +283,7 @@ class FailureColumnSelector:
         write_line("  │  Select the 1 column that indicates there was an evaluation failure." + " " * 23 + "│")
         write_line("  │  - This should correspond to a column name in your Weave traces table in the app." + " " * 10 + "│")
         write_line("  │  - This could be a boolean, numeric or string column like 'is_correct' or 'score' etc." + " " * 5 + "│")
-        write_line("  │  - The failure categorization will use this column to find the failures to focus on." + " " * 9 + "│")
+        write_line("  │  - The failure categorization will use this column to find the failures to focus on." + " " * 7 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  \033[2m↑/↓: Navigate    Space: Select    q: Cancel\033[0m" + " " * 47 + "│")
         write_line("  ╰" + "─" * 92 + "╯")

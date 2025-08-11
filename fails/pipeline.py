@@ -101,8 +101,8 @@ class Args:
     test_config: str | None = None  # Optional test config file
     wandb_entity: str | None = None  # Will be extracted from URL or provided via CLI
     wandb_project: str | None = None  # Will be extracted from URL or provided via CLI
-    wandb_logging_entity: str = "wandb-applied-ai-team"
-    wandb_logging_project: str = "eval-failures-testing"
+    wandb_logging_entity: str | None = None  # Optional entity for weave.init() - can be from CLI or .env
+    wandb_logging_project: str = "eval-failures"  # Project for weave.init() - can be from CLI or .env
     n_samples: int | None = None
     max_concurrent_llm_calls: int = 20  # Control concurrent LLM API calls
     eval_id: str | None = None  # Optional evaluation ID to skip interactive selection
@@ -600,7 +600,7 @@ def get_column_preferences(
             combined_content += f"Filter: [cyan]{saved_failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
         
         # Add column configuration section
-        combined_content += "[bold]📊 Column Configuration[/bold]\n"
+        combined_content += "[bold]Column Configuration[/bold]\n"
         combined_content += f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
         combined_content += "[dim]To re-select evaluation, failure and context columns, re-run with --force-eval-selection[/dim]\n"
 
@@ -624,7 +624,7 @@ def get_column_preferences(
         console.print(
             Panel(
                 combined_content.rstrip(),
-                title="📊 Configuration Summary",
+                title="Configuration Summary",
                 border_style="yellow",
                 padding=(1, 2),
             )
@@ -748,7 +748,7 @@ def get_column_preferences(
             combined_content += f"Filter: [cyan]{failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
         
         # Add column configuration section
-        combined_content += "[bold]📊 Column Configuration[/bold]\n"
+        combined_content += "[bold]Column Configuration[/bold]\n"
         combined_content += f"[bright_magenta]Selected {len(selected_columns)} columns[/bright_magenta]\n"
         
         # Group columns for display
@@ -781,7 +781,7 @@ def get_column_preferences(
         console.print(
             Panel(
                 combined_content.rstrip(),
-                title="📊 Configuration Summary",
+                title="Configuration Summary",
                 border_style="white",
                 padding=(1, 2),
             )
@@ -1180,10 +1180,7 @@ async def run_pipeline(
         max_concurrent_llm_calls=max_concurrent_llm_calls,
     )
     
-    review_spinner.stop("Review completed successfully", success=True)
-
-    # Pretty print the review result
-    console.print("[bright_magenta]  ✓ Review completed successfully![/bright_magenta]")
+    review_spinner.stop("[bright_magenta]  ✓ Review completed successfully![/bright_magenta]", success=True)
 
     if debug:
         console.print("=" * 80)
@@ -1391,7 +1388,7 @@ async def run_extract_and_classify_pipeline(
     console.print("")  # Add spacing
     console.print(Panel(
         report,
-        title="📊 Evaluation Report",
+        title="Evaluation Report",
         border_style="white",
         padding=(1, 2),
     ))
@@ -1432,6 +1429,33 @@ if __name__ == "__main__":
     console.print("[bold bright_magenta]   └───────────────────────────────────────────────────────────────────────┘[/bold bright_magenta]")
     
     args: Args = simple_parsing.parse(Args)
+    
+    # Check environment variables for wandb_logging_entity and wandb_logging_project if not provided via CLI
+    if args.wandb_logging_entity is None:
+        args.wandb_logging_entity = os.getenv("WANDB_LOGGING_ENTITY")
+    if not args.wandb_logging_project:
+        env_project = os.getenv("WANDB_LOGGING_PROJECT")
+        if env_project:
+            args.wandb_logging_project = env_project
+    
+    # Check for n_samples from environment if not provided via CLI
+    if args.n_samples is None:
+        env_n_samples = os.getenv("N_SAMPLES")
+        if env_n_samples:
+            try:
+                args.n_samples = int(env_n_samples)
+            except ValueError:
+                console.print(f"[yellow]Warning: Invalid N_SAMPLES value in .env: {env_n_samples}[/yellow]")
+    
+    # Check for max_concurrent_llm_calls from environment if not provided via CLI
+    env_max_concurrent = os.getenv("MAX_CONCURRENT_LLM_CALLS")
+    if env_max_concurrent:
+        try:
+            # Only override if not explicitly set via CLI (check if it's still the default value)
+            if args.max_concurrent_llm_calls == 20:  # 20 is the default value
+                args.max_concurrent_llm_calls = int(env_max_concurrent)
+        except ValueError:
+            console.print(f"[yellow]Warning: Invalid MAX_CONCURRENT_LLM_CALLS value in .env: {env_max_concurrent}[/yellow]")
     
     # Load test config if specified
     test_config = None
@@ -1578,7 +1602,7 @@ What the user is trying to evaluate in their AI system:
 </user_eval_context>
 
 """
-    
+ 
     # Update args.config_file to use our resolved config_file path
     args.config_file = config_file
 
@@ -1590,7 +1614,15 @@ What the user is trying to evaluate in their AI system:
     if args.debug:
         litellm._turn_on_debug()
 
-    weave.init(f"{args.wandb_logging_entity}/{args.wandb_logging_project}")
+    # Initialize Weave with optional entity
+    # If wandb_logging_entity is provided (via CLI or .env), use entity/project format
+    # Otherwise, just use the project name
+    if args.wandb_logging_entity:
+        weave_project = f"{args.wandb_logging_entity}/{args.wandb_logging_project}"
+    else:
+        weave_project = args.wandb_logging_project
+    
+    weave.init(weave_project)
 
     asyncio.run(
         run_extract_and_classify_pipeline(

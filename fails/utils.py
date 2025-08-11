@@ -53,7 +53,7 @@ def display_evaluation_summary(
         eval_info += f"\n[bold cyan]Failure filter:[/bold cyan] {filter_display}"
         eval_info += f"\n[bold cyan]Filtered children:[/bold cyan] {len(eval_data.get('children', []))}"
 
-    console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="white"))
+    console.print(Panel(eval_info, title="Evaluation Summary", border_style="white"))
 
     # Show evaluation summary if available
     if "summary" in eval_data["evaluation"]:
@@ -417,7 +417,7 @@ def generate_evaluation_report(
                         report += "\n"
 
         # Add list of all trace IDs for this category as a Python list
-        report += f"\n[cyan]Trace IDs for this category (Python list for easy copy-paste):[/cyan]\n"
+        report += f"\n[cyan]Linked trace IDs for this category (click to view in W&B):[/cyan]\n"
         report += "[dim][\n"
         trace_ids_with_links = []
         for trace in traces:
