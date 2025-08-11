@@ -39,8 +39,8 @@ GOOGLE_API_KEY=your_google_api_key_here
 ## Run FAILS
 
 ```bash
-# Run with default model (Gemini 2.5 Pro)
-uv run fails/pipeline.py
+# Log in to W&B and then run the pipeline (default model is Gemini 2.5 Pro)
+wandb login && uv run fails/pipeline.py
 ```
 
 The pipeline will analyze evaluation failures and categorize them. The pipeline will ask for a Weave Evaluation URL, some context about your task, and the relevant columns that have been logged to Weave to help with the failure categorization.
