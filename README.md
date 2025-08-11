@@ -24,7 +24,7 @@ The goal is not to remove the need to look at your data, but instead try and sho
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Add a LLM model name to .env in [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc:
+2. Add a LLM model name to `.env` in [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc:
 
 ```bash
 LLM_MODEL=gemini/gemini-2.5-pro
@@ -32,16 +32,8 @@ LLM_MODEL=gemini/gemini-2.5-pro
 
 3. Add the API key for your chosen LLM provider to `.env`:
 ```env
-# For Google/Gemini models
+# GOOGLE_API_KEY or ANTHROPIC_API_KEY or OPENAI_API_KEY etc...
 GOOGLE_API_KEY=your_google_api_key_here
-
-# For Anthropic/Claude models  
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-
-# For OpenAI models
-OPENAI_API_KEY=your_openai_api_key_here
-
-...
 ```
 
 ## Run FAILS
