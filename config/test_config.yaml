@@ -1,0 +1,18 @@
+# Test configuration for development
+# This file contains hardcoded values for testing purposes
+
+# Weave evaluation URL for testing
+test_evaluation_url: "https://wandb.ai/wandb-applied-ai-team/eval-failures/weave/evaluations?view=evaluations_default&peekPath=%2Fwandb-applied-ai-team%2Feval-failures%2Fcalls%2F0197a72d-2704-7ced-8c07-0fa1e0ab0557%3FhideTraceTree%3D1"
+
+# Direct evaluation ID (extracted from URL above)
+test_evaluation_id: "0197a72d-2704-7ced-8c07-0fa1e0ab0557"
+
+# Test mode settings
+test_mode:
+  enabled: true
+  # Skip interactive evaluation selection in test mode
+  skip_eval_selection: true
+  # Use smaller sample size for faster testing
+  n_samples: 5
+  # Use faster model for testing
+  model: "gemini/gemini-2.5-flash"

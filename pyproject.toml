@@ -3,14 +3,19 @@ name = "fails"
 version = "0.1.0"
 description = "Generate insights from W&B Weave Evals"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "litellm>=1.73.1",
     "openai-agents[litellm]>=0.0.19",
+    "prompt-toolkit>=3.0.0",
     "pydantic>=2.11.7",
     "python-dotenv>=1.1.1",
-    "simple-parsing>=0.1.7",
     "weave>=0.51.56",
+    "wandb-workspaces>=0.1.16",
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "PyYAML>=6.0",
+    "simple-parsing>=0.1.7"
 ]
 
 [build-system]

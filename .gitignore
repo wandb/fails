@@ -11,7 +11,10 @@ uv.lock
 .python-version
 speaker_classification.csv
 
-.vscode/*
+.vscode/
+
+wandb/
+reports/
 
 # Distribution / packaging
 .Python
@@ -135,7 +138,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+# .env
 .venv
 env/
 venv/

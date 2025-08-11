@@ -6,10 +6,13 @@ Simple arrow key selector that works reliably across different terminals.
 import sys
 import termios
 import tty
-from typing import List, Set, Tuple
+from typing import List, Set
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
+
+
+class UserCancelledException(Exception):
+    """Exception raised when user cancels the selection."""
 
 
 class SimpleArrowSelector:
@@ -53,6 +56,10 @@ class SimpleArrowSelector:
     
     def run(self) -> Set[str]:
         """Run the selector with simple display."""
+        # Check if we're in an interactive terminal
+        if not sys.stdin.isatty():
+            raise RuntimeError("Interactive selection requires a TTY. Use --no-interactive flag or provide columns via command line.")
+        
         # Save terminal settings
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -77,11 +84,14 @@ class SimpleArrowSelector:
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K  ╭" + "─" * 92 + "╮\r\n")
-                sys.stdout.write("\033[K  │  \033[1m📋 Column Selection\033[0m" + " " * 72 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[1;96mStep 4: Select Context Columns\033[0m" + " " * 60 + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
-                sys.stdout.write("\033[K  │  Select columns to include in the output. " + f"Selected: {len(self.selected)}/{len(self.columns)}" + " " * (48 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
+                sys.stdout.write("\033[K  │  Select input, output or scorer columns to help give the failure categorization" + " " * 11 + "│\r\n")
+                sys.stdout.write("\033[K  │  pipeline more context" + " " * 69 + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
-                sys.stdout.write("\033[K  │  \033[2m↑/↓: Navigate    Space: Select    a: All    n: None    q: Save\033[0m" + " " * 28 + "│\r\n")
+                sys.stdout.write("\033[K  │  Selected: \033[95m" + f"{len(self.selected)}/{len(self.columns)}" + "\033[0m" + " " * (90 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
+                sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[2m↑/↓: Navigate    Space: Select    a: All    n: None    Enter: Save\033[0m" + " " * 24 + "│\r\n")
                 sys.stdout.write("\033[K  ╰" + "─" * 92 + "╯\r\n")
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
@@ -122,8 +132,8 @@ class SimpleArrowSelector:
                         if i > 0 and i > start:
                             sys.stdout.write("\033[K\r\n")
                         # Group headers are never selectable, always use same prefix
-                        # Use bold yellow for group headers to match failure_selector
-                        sys.stdout.write(f"\033[K   \033[1;33m{item_data}\033[0m\r\n")
+                        # Use bold bright magenta for group headers for consistency
+                        sys.stdout.write(f"\033[K   \033[1;95m{item_data}\033[0m\r\n")
                     else:
                         # Column
                         is_selected = item_data in self.selected
@@ -134,9 +144,9 @@ class SimpleArrowSelector:
                             sys.stdout.write(f"\033[K{prefix} \033[96m{item_data}\033[0m\r\n")
                         else:
                             prefix = "   "
-                            # Show selected items in a different color
+                            # Show selected items with magenta text
                             if is_selected:
-                                sys.stdout.write(f"\033[K{prefix}   \033[92m{item_data}\033[0m\r\n")  # Green for selected
+                                sys.stdout.write(f"\033[K{prefix}   \033[95m{item_data}\033[0m\r\n")  # Magenta text, no checkmark
                             else:
                                 sys.stdout.write(f"\033[K{prefix}   {item_data}\r\n")
                 
@@ -173,9 +183,9 @@ class SimpleArrowSelector:
                     continue
                 
                 # Handle other keys
-                if key == 'q':
+                if key == '\r' or key == '\n':  # Enter - save and exit
                     break
-                elif key == ' ' or key == '\r' or key == '\n':  # Space or Enter - toggle
+                elif key == ' ':  # Space - toggle selection
                     if self.current_index < len(self.items) and self.items[self.current_index][0] == 'column':
                         col = self.items[self.current_index][1]
                         if col in self.selected:
@@ -222,50 +232,12 @@ def simple_arrow_selection(
     
     Uses basic terminal control without Rich for the interactive part.
     """
-    # Show initial message
-    console.print(Panel(
-        "[bold cyan]Column Selection[/bold cyan]\n\n"
-        "Starting arrow key selector...\n"
-        "[dim]Use ↑/↓ to navigate, Space to toggle[/dim]",
-        border_style="cyan"
-    ))
-    
-    # Run the selector
+    # Don't show initial message - keep UI clean
+    # Run the selector silently
     selector = SimpleArrowSelector(columns, preselected)
     selected = selector.run()
     
-    # Show results with Rich
-    console.print(Panel(
-        f"[bold green]Selection Complete![/bold green]\n\n"
-        f"Selected {len(selected)} out of {len(columns)} columns",
-        border_style="green"
-    ))
-    
-    if selected:
-        console.print("\n[bold]Selected columns:[/bold]")
-        
-        # Group for display
-        grouped = {}
-        other = []
-        
-        for col in sorted(selected):
-            if '.' in col:
-                prefix = col.split('.')[0]
-                if prefix not in grouped:
-                    grouped[prefix] = []
-                grouped[prefix].append(col)
-            else:
-                other.append(col)
-        
-        for group, cols in sorted(grouped.items()):
-            console.print(f"\n[yellow]{group}:[/yellow]")
-            for col in cols:
-                console.print(f"  • {col}")
-        
-        if other:
-            console.print(f"\n[yellow]other:[/yellow]")
-            for col in other:
-                console.print(f"  • {col}")
+    # Don't show detailed results here - they'll be shown in the Configuration Summary
     
     return selected
 

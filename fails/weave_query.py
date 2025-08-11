@@ -248,10 +248,17 @@ class WeaveQueryClient:
                 "attributes",
             ]
 
-        # Build query with filters
+        # Build query with MongoDB-style filter
         query = {
             "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
-            "filters": {"op": "EqOperation", "field": "id", "value": call_id},
+            "query": {
+                "$expr": {
+                    "$eq": [
+                        {"$getField": "id"},
+                        {"$literal": call_id}
+                    ]
+                }
+            },
             "columns": columns,
         }
 
@@ -505,10 +512,9 @@ class WeaveQueryClient:
             else:
                 query["query"] = {"$expr": {"$and": expr_conditions}}
             
-            # Add sorting for filtered fields
-            for field in filter_dict.keys():
-                query["sort_by"] = [{"field": field, "direction": "asc"}]
-                break  # Just use the first field for sorting
+            # Default sorting by started_at unless explicitly specified
+            if "sort_by" not in query:
+                query["sort_by"] = [{"field": "started_at", "direction": "asc"}]
 
         if limit is not None:
             query["limit"] = limit

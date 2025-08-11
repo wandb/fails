@@ -15,25 +15,26 @@ class SpeakerAffiliationResponse(BaseModel):
     reasoning: str
     affiliation: str
 
-SYSTEM_PROMPT = "You are an expert at analyzing conversation transcripts and identifying if speakers are Weights & Biases employees (internal) or external participants (prospects/users). IMPORTANT: By default, classify speakers as external unless there is strong evidence they are internal W&B employees. Technical knowledge alone is not sufficient to classify someone as internal."
-
-DUMB_SYSTEM_PROMPT = """You are an expert at analyzing conversation transcripts and \
+# Configuration
+SYSTEM_PROMPT = """You are an expert at analyzing conversation transcripts and \
 identifying if speakers are Weights & Biases employees (internal) or external participants \
 (prospects/users).
 """
-SYSTEM_PROMPT = DUMB_SYSTEM_PROMPT
 
 USER_PROMPT = "Analyze if speaker {speaker_id} is internal (W&B employee) or external (prospect/user). FULL CONVERSATION CONTEXT: {full_transcript} SPEAKER'S SPECIFIC LINES: {transcript} Remember: Default to external classification unless there is clear evidence the speaker is a W&B employee."
-LLM_MODEL = "anthropic/claude-3-5-sonnet-20241022"
-LLM_MODEL = "openai/gpt-4.1-mini"
+
+# Default model - can be overridden via environment variable or command line
+LLM_MODEL = os.getenv("EVAL_LLM_MODEL", "openai/gpt-4-mini")
 
 def filter_transcript_by_speaker(full_transcript: str, speaker_id: str) -> str:
     blocks = full_transcript.split("speaker:")
     speaker_texts = []
     for block in blocks:
-        if not block.strip(): continue
+        if not block.strip():
+            continue
         lines = block.strip().split('\n')
-        if not lines: continue
+        if not lines:
+            continue
         if str(speaker_id) in lines[0]:
             text_lines = [line.strip() for line in lines[2:] if line.strip() and not line.strip().startswith('timestamp:')]
             if text_lines:
