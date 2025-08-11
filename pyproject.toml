@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.11.7",
     "python-dotenv>=1.1.1",
     "weave>=0.51.56",
+    "wandb>=0.21.1",
     "wandb-workspaces>=0.1.16",
     "requests>=2.31.0",
     "rich>=13.0.0",
