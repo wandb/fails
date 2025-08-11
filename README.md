@@ -46,7 +46,7 @@ Analyze evaluation failures and categorize them. The pipeline will ask for a Wea
 
 ```bash
 # Run with default model (Gemini 2.5 Pro)
-uv run python fails/pipeline.py
+uv run fails/pipeline.py
 ```
 
 ## Additional options
@@ -54,15 +54,15 @@ You can adjust the pipeline settings either via the env vars in `.env` or via cl
 
 ```bash
 # Debug mode (uses faster gemini-2.5-flash, limits to 5 samples)
-uv run python fails/pipeline.py --debug
+uv run fails/pipeline.py --debug
 
 # Use different models
-uv run python fails/pipeline.py --model "openai/gpt-4o"
-uv run python fails/pipeline.py --model "anthropic/claude-3-5-sonnet-latest"
-uv run python fails/pipeline.py --model "gemini/gemini-2.0-flash-exp"
+uv run fails/pipeline.py --model "openai/gpt-4o"
+uv run fails/pipeline.py --model "anthropic/claude-3-5-sonnet-latest"
+uv run fails/pipeline.py --model "gemini/gemini-2.0-flash-exp"
 
 # Limit samples and concurrency
-uv run python fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
+uv run fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
 ```
 
 ### Optional: Pipeline Configuration
