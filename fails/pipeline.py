@@ -6,7 +6,9 @@ import sys
 from asyncio import Semaphore
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+import re
+from datetime import datetime
 
 import litellm
 import simple_parsing
@@ -18,6 +20,9 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+# Import wandb for report creation
+import wandb
 
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fails.cli.column_context_selector import simple_arrow_selection
@@ -59,6 +64,154 @@ set_tracing_disabled(True)
 
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
+
+
+@weave.op
+def save_report_to_file(
+    report_text: str,
+    eval_name: str,
+    wandb_entity: str,
+    wandb_project: str,
+    console: Console,
+) -> Optional[str]:
+    """
+    Save the evaluation report to a local markdown file.
+    
+    Args:
+        report_text: The markdown report text
+        eval_name: Name of the evaluation
+        wandb_entity: W&B entity name
+        wandb_project: W&B project name
+        console: Rich console for output
+    
+    Returns:
+        Path to the saved file, or None if save fails
+    """
+    try:
+        # Create reports directory if it doesn't exist
+        reports_dir = Path("reports")
+        reports_dir.mkdir(exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        # Clean eval_name for filename (remove special characters)
+        clean_eval_name = re.sub(r'[^\w\s-]', '', eval_name)
+        clean_eval_name = re.sub(r'[-\s]+', '-', clean_eval_name)
+        
+        filename = f"{timestamp}_{wandb_entity}_{wandb_project}_{clean_eval_name}.md"
+        filepath = reports_dir / filename
+        
+        # Write the report to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            # Add metadata header
+            f.write(f"---\n")
+            f.write(f"title: {eval_name}\n")
+            f.write(f"entity: {wandb_entity}\n")
+            f.write(f"project: {wandb_project}\n")
+            f.write(f"generated: {datetime.now().isoformat()}\n")
+            f.write(f"---\n\n")
+            
+            # Write the report content
+            f.write(report_text)
+        
+        return str(filepath)
+        
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not save report to file: {e}[/yellow]")
+        return None
+
+
+@weave.op
+def create_wandb_report(
+    entity_name: str,
+    project_name: str,
+    title: str,
+    markdown_report_text: str,
+    description: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Create a W&B report from the evaluation failure analysis.
+    
+    Args:
+        entity_name: The W&B entity (team or username)
+        project_name: The W&B project name
+        title: Title of the W&B Report
+        markdown_report_text: Markdown text for the report body
+        description: Optional description of the W&B Report
+    
+    Returns:
+        The URL of the created report, or None if creation fails
+    """
+    try:
+        # Only import wandb_workspaces if we're actually creating a report
+        try:
+            import wandb_workspaces.reports.v2 as wr
+        except ImportError:
+            console = Console()
+            console.print("[yellow]wandb_workspaces not installed. Install with: pip install wandb-workspaces[/yellow]")
+            return None
+        
+        # Initialize wandb
+        wandb.init(
+            entity=entity_name, 
+            project=project_name, 
+            job_type="fails_report_creation",
+            reinit=True  # Allow reinit since we already have a wandb session
+        )
+        
+        # Initialize the report
+        report = wr.Report(
+            entity=entity_name,
+            project=project_name,
+            title=title,
+            description=description or f"Evaluation failure analysis for {project_name}",
+            width="fluid",
+        )
+        
+        # Parse markdown content into W&B blocks
+        blocks = []
+        lines = markdown_report_text.strip().split("\n")
+        current_paragraph = []
+        
+        for line in lines:
+            # Check for headers
+            h1_match = re.match(r"^# (.+)$", line)
+            h2_match = re.match(r"^## (.+)$", line)
+            h3_match = re.match(r"^### (.+)$", line)
+            
+            # If we hit a header and have paragraph content, finalize the paragraph
+            if (h1_match or h2_match or h3_match) and current_paragraph:
+                blocks.append(wr.P("\n".join(current_paragraph)))
+                current_paragraph = []
+            
+            # Handle the current line
+            if h1_match:
+                blocks.append(wr.H1(h1_match.group(1)))
+            elif h2_match:
+                blocks.append(wr.H2(h2_match.group(1)))
+            elif h3_match:
+                blocks.append(wr.H3(h3_match.group(1)))
+            else:
+                if line.strip():  # Only add non-empty lines
+                    current_paragraph.append(line)
+        
+        # Don't forget any remaining paragraph content
+        if current_paragraph:
+            blocks.append(wr.P("\n".join(current_paragraph)))
+        
+        # Set the blocks
+        report.blocks = blocks
+        
+        # Save the report
+        report.save()
+        wandb.finish()
+        
+        return report.url
+        
+    except Exception as e:
+        console = Console()
+        console.print(f"[yellow]Warning: Could not create W&B report: {e}[/yellow]")
+        return None
 
 
 def get_api_key_for_model(model: str) -> str:
@@ -209,7 +362,7 @@ def save_column_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    console.print(f"[bright_magenta]  ✓ Saved column preferences to {config_file}[/bright_magenta]")
+    # Don't print here - will be shown in Configuration Summary
 
 
 @weave.op
@@ -417,7 +570,7 @@ def save_failure_column_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    console.print(f"[bright_magenta]✓[/bright_magenta] [green]Saved failure column preferences to {config_file}[/green]")
+    # Don't print here - will be shown in Configuration Summary
 
 
 @weave.op
@@ -447,8 +600,7 @@ def get_column_preferences(
         - failure_config: Dict with 'failure_column' and 'failure_filter' or None
         - columns_list: List of column names for data extraction
     """
-    # First, handle failure column selection
-    console.print("\n[bold cyan]Step 3: Select Failure Filter[/bold cyan]")
+    # First, handle failure column selection - no need to print header
 
     # Get all available columns first
     column_info = get_available_columns(
@@ -511,12 +663,7 @@ def get_column_preferences(
         failure_config = saved_failure_config
     else:
         # Perform failure column selection
-        if saved_failure_config and force_eval_select:
-            console.print(
-                "[dim]Force selection enabled - overriding saved failure column[/dim]"
-            )
-        else:
-            console.print("[dim]No saved failure column preferences found[/dim]")
+        # Perform failure column selection silently
 
         # Interactive failure column selection
         failure_column, failure_value = interactive_failure_column_selection(
@@ -526,7 +673,7 @@ def get_column_preferences(
         # Handle user cancellation
         if failure_column is None:
             console.print("[red]Exiting: Failure column selection was cancelled.[/red]")
-            return
+            return None, None
 
         if failure_column and failure_value is not None:
             # Build the failure config
@@ -595,14 +742,12 @@ def get_column_preferences(
                 else:
                     filter_desc = f"{op_symbol} {op_value}"
             
-            combined_content += "[bold]🔎 Failure Filter Configuration[/bold]\n"
-            combined_content += f"[green]Using saved failure column configuration[/green]\n"
+            combined_content += "[bold]Failure Filter[/bold]\n"
             combined_content += f"Filter: [cyan]{saved_failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
         
         # Add column configuration section
-        combined_content += "[bold]Column Configuration[/bold]\n"
-        combined_content += f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
-        combined_content += "[dim]To re-select evaluation, failure and context columns, re-run with --force-eval-selection[/dim]\n"
+        combined_content += "[bold]Context Columns[/bold]\n"
+        combined_content += f"Selected {len(selected_columns)} columns\n"
 
         # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
@@ -631,20 +776,9 @@ def get_column_preferences(
         )
 
     else:
-        # Perform column selection
-        console.print("\n[bold cyan]Step 4: Select Context Columns[/bold cyan]")
+        # Perform column selection - no need to print header
 
-        if debug:
-            if saved_columns and force_eval_select:
-                console.print(
-                    "[dim]Force selection enabled - overriding saved preferences[/dim]"
-                )
-            elif not saved_columns:
-                console.print(
-                    "[dim]No saved preferences found for this project[/dim]"
-                )
-
-            console.print("[dim]Using discovered columns for selection...[/dim]")
+        # Debug messages removed for cleaner UI
 
         # Filter columns based on user requirements
         # Define metadata columns to exclude (not relevant for analysis)
@@ -710,10 +844,9 @@ def get_column_preferences(
         selected_columns = interactive_column_selection(
             console, filtered_columns, preselected
         )
+        
 
-        console.print(f"\n[bright_magenta]  ✓ Selected {len(selected_columns)} columns[/bright_magenta]")
-
-        # Save preferences
+        # Save preferences silently
         save_column_preferences(
             config_file, wandb_entity, wandb_project, list(selected_columns), console
         )
@@ -743,13 +876,12 @@ def get_column_preferences(
                 else:
                     filter_desc = f"{op_symbol} {op_value}"
             
-            combined_content += "[bold]🔎 Failure Filter Configuration[/bold]\n"
-            combined_content += f"[bright_magenta]New failure column configuration[/bright_magenta]\n"
-            combined_content += f"Filter: [cyan]{failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
+            combined_content += "[bold]Failure Filter[/bold]\n"
+            combined_content += f"Filter: [cyan]{failure_config['failure_column']} {filter_desc}[/cyan]\n\n"
         
         # Add column configuration section
-        combined_content += "[bold]Column Configuration[/bold]\n"
-        combined_content += f"[bright_magenta]Selected {len(selected_columns)} columns[/bright_magenta]\n"
+        combined_content += "[bold]Context Columns[/bold]\n"
+        combined_content += f"Selected {len(selected_columns)} columns\n"
         
         # Group columns for display
         grouped = {}
@@ -1099,10 +1231,7 @@ async def run_pipeline(
 
     num_draft_categorizations = len(draft_categorization_results)
     
-    draft_spinner.stop(f"Completed {num_draft_categorizations} draft categorizations", success=True)
-
-    # Create a nice display for draft categorization results
-    console.print(f"[bright_magenta]  ✓ Completed {num_draft_categorizations} draft categorizations[/bright_magenta]")
+    draft_spinner.stop(f"[bright_magenta]  ✓ Completed {num_draft_categorizations} draft categorizations[/bright_magenta]", success=True)
 
     # ----------------- STEP 2: Review categorizations -----------------
 
@@ -1254,7 +1383,7 @@ async def run_pipeline(
         debug=debug,
     )
     
-    classification_spinner.stop(f"Classification complete", success=True)
+    classification_spinner.stop("Classification complete", success=True)
 
     return PipelineResult(
         failure_categories=all_categories,
@@ -1279,10 +1408,6 @@ async def run_extract_and_classify_pipeline(
     # Query Weave for evaluation data using the enhanced API
     console = Console()
 
-    # Start spinner for fetching evaluation
-    spinner = FailsSpinner("Fetching evaluation trace")
-    spinner.start()
-
     if debug:
         console.print(
             f"[bold red]🔍 DEBUG MODE ENABLED, switching to {model}[/bold red]"
@@ -1290,18 +1415,17 @@ async def run_extract_and_classify_pipeline(
         model = "gemini/gemini-2.5-flash"
         n_samples = 3 if n_samples is None else n_samples
 
-    # Display user context in a nice yellow box
-    console.print(
-        Panel(
-            user_context,
-            title="📝 User Context",
-            border_style="white",
-            padding=(1, 2),
+    # Display user context in a nice box
+    if debug:
+        console.print(
+            Panel(
+                user_context,
+                title="User Context",
+                border_style="white",
+                padding=(1, 2),
+                width=105,
+            )
         )
-    )
-
-    # Stop spinner before interactive selection
-    spinner.stop("Evaluation trace fetched", success=True)
     
     # ----------------- Column Selection -----------------
 
@@ -1341,7 +1465,7 @@ async def run_extract_and_classify_pipeline(
     # Filter the evaluation data to only include selected columns
     if debug:
         console.print(
-            f"[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
+            "[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
         )
     eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
 
@@ -1388,10 +1512,39 @@ async def run_extract_and_classify_pipeline(
     console.print("")  # Add spacing
     console.print(Panel(
         report,
-        title="Evaluation Report",
+        title="Evaluation Failures Report",
         border_style="white",
         padding=(1, 2),
     ))
+
+    # Save report to local file
+    eval_name = eval_data["evaluation"].get("display_name", eval_id)
+    local_filepath = save_report_to_file(
+        report_text=report,
+        eval_name=eval_name,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        console=console
+    )
+    
+    if local_filepath:
+        console.print(f"[bright_magenta]✓ Report saved to: {local_filepath}[/bright_magenta]")
+
+    # Create W&B report
+    console.print("\n[cyan]Creating W&B report...[/cyan]")
+    report_url = create_wandb_report(
+        entity_name=wandb_entity,
+        project_name=wandb_project,
+        title=f"Evaluation Failures: {eval_data['evaluation'].get('display_name', eval_id)}",
+        markdown_report_text=report,
+        description=f"Failure categorization analysis for evaluation {eval_id}"
+    )
+    
+    if report_url:
+        console.print(f"[bright_magenta]✓ W&B Report created successfully![/bright_magenta]")
+        console.print(f"[bold cyan]📊 View report at: {report_url}[/bold cyan]")
+    else:
+        console.print("[dim]W&B report creation skipped (wandb-workspaces may not be installed)[/dim]")
 
     console.print("\n[bright_magenta]✓ Pipeline completed successfully![/bright_magenta]")
 
@@ -1495,9 +1648,6 @@ if __name__ == "__main__":
                 wandb_entity_extracted = config_result['entity']
                 wandb_project_extracted = config_result['project']
                 
-                # Load the config but don't get evaluation ID (user should provide fresh one)
-                # This ensures we use the saved columns/filters but get a new evaluation
-                console.print(f"[dim]Loaded configuration for {wandb_entity_extracted}/{wandb_project_extracted}[/dim]")
                 # Force evaluation selection to get the current eval ID
                 args.force_eval_select = True
         else:

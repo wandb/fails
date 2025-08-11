@@ -30,9 +30,11 @@ def filter_transcript_by_speaker(full_transcript: str, speaker_id: str) -> str:
     blocks = full_transcript.split("speaker:")
     speaker_texts = []
     for block in blocks:
-        if not block.strip(): continue
+        if not block.strip():
+            continue
         lines = block.strip().split('\n')
-        if not lines: continue
+        if not lines:
+            continue
         if str(speaker_id) in lines[0]:
             text_lines = [line.strip() for line in lines[2:] if line.strip() and not line.strip().startswith('timestamp:')]
             if text_lines:

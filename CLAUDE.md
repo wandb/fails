@@ -109,8 +109,13 @@ console.print("Fetching evaluation trace...")
 #### Step Numbering
 Main flow uses consistent numbering:
 - Step 1: Enter Weave Evaluation URL
-- Step 2: Select Failure Filter (with sub-steps 2a, 2b, 2c)
-- Step 3: Select Context Columns
+- Step 2: Provide Context (AI system and evaluation descriptions)
+- Step 3: Select Failure Filter (with sub-steps 3a, 3b, 3c, 3d)
+  - 3a: Select the column
+  - 3b: Choose the operator
+  - 3c: Enter the value
+  - 3d: Confirm the filter (ensures it identifies INCORRECT samples)
+- Step 4: Select Context Columns
 
 #### Box Styles
 - Use rounded boxes (`╭─╮`) for raw terminal UIs

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import weave
 from rich.console import Console
@@ -152,7 +152,7 @@ def prepare_trace_data_for_pipeline(
             if debug and i == 0:
                 display_trace_debug_info(trace, trace_entry, i, console)
     else:
-        console.print(f"[red]No children found in eval_data[/red]")
+        console.print("[red]No children found in eval_data[/red]")
         raise ValueError("No children found in eval_data")
     
     return trace_data
@@ -353,7 +353,7 @@ def generate_evaluation_report(
     # Generate report
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    report = f"[bold bright_cyan]## {eval_name} Evaluation Report[/bold bright_cyan] [dim]- {current_time}[/dim]\n\n"
+    report = f"[bold bright_cyan]## '{eval_name}' Evaluation Failures[/bold bright_cyan] [dim]- {current_time}[/dim]\n\n"
 
     # Add summary table to the report
     # Calculate max widths for alignment
@@ -385,7 +385,7 @@ def generate_evaluation_report(
         report += f"{display_name.ljust(max_category_width)} | [{count_color}]{str(count).center(10)}[/{count_color}] | {f'{percentage:.1f}%'.center(12)}\n"
 
     report += "\n"
-    report += f"[bold bright_cyan]### Failure Categories:[/bold bright_cyan]\n\n"
+    report += "[bold bright_cyan]### Failure Categories:[/bold bright_cyan]\n\n"
 
     for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
         traces = category_data["traces"]
@@ -417,7 +417,7 @@ def generate_evaluation_report(
                         report += "\n"
 
         # Add list of all trace IDs for this category as a Python list
-        report += f"\n[cyan]Linked trace IDs for this category (click to view in W&B):[/cyan]\n"
+        report += "\n[cyan]Linked trace IDs for this category (click to view in W&B):[/cyan]\n"
         report += "[dim][\n"
         trace_ids_with_links = []
         for trace in traces:

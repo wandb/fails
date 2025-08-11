@@ -6,10 +6,9 @@ Simple arrow key selector that works reliably across different terminals.
 import sys
 import termios
 import tty
-from typing import List, Set, Tuple
+from typing import List, Set
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 
 
 class UserCancelledException(Exception):
@@ -85,11 +84,13 @@ class SimpleArrowSelector:
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K  ╭" + "─" * 92 + "╮\r\n")
-                sys.stdout.write("\033[K  │  \033[1;96mStep 4: Select Context Columns\033[0m" + " " * 61 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[1;96mStep 4: Select Context Columns\033[0m" + " " * 60 + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
-                sys.stdout.write("\033[K  │  Select columns to include in the output. " + f"Selected: {len(self.selected)}/{len(self.columns)}" + " " * (48 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
+                sys.stdout.write("\033[K  │  Select input, output or scorer columns to help give the failuare categorization" + " " * 11 + "│\r\n")
+                sys.stdout.write("\033[K  │  more context" + " " * 77 + "│\r\n")
+                sys.stdout.write("\033[K  │  Selected: " + f"{len(self.selected)}/{len(self.columns)}" + " " * (90 - len(f"Selected: {len(self.selected)}/{len(self.columns)}")) + "│\r\n")
                 sys.stdout.write("\033[K  │" + " " * 92 + "│\r\n")
-                sys.stdout.write("\033[K  │  \033[2m↑/↓: Navigate    Space: Select    a: All    n: None    q: Save\033[0m" + " " * 28 + "│\r\n")
+                sys.stdout.write("\033[K  │  \033[2m↑/↓: Navigate    Space: Toggle    a: All    n: None    Enter: Save\033[0m" + " " * 24 + "│\r\n")
                 sys.stdout.write("\033[K  ╰" + "─" * 92 + "╯\r\n")
                 sys.stdout.write("\033[K\r\n")
                 sys.stdout.write("\033[K\r\n")
@@ -181,9 +182,9 @@ class SimpleArrowSelector:
                     continue
                 
                 # Handle other keys
-                if key == 'q':
+                if key == '\r' or key == '\n':  # Enter - save and exit
                     break
-                elif key == ' ' or key == '\r' or key == '\n':  # Space or Enter - toggle
+                elif key == ' ':  # Space - toggle selection
                     if self.current_index < len(self.items) and self.items[self.current_index][0] == 'column':
                         col = self.items[self.current_index][1]
                         if col in self.selected:
@@ -230,46 +231,12 @@ def simple_arrow_selection(
     
     Uses basic terminal control without Rich for the interactive part.
     """
-    # Show initial message
-    console.print(Panel(
-        "[bold cyan]Step 4: Select Context Columns[/bold cyan]\n\n"
-        "Starting arrow key selector...\n"
-        "[dim]Use ↑/↓ to navigate, Space to toggle[/dim]",
-        border_style="cyan"
-    ))
-    
-    # Run the selector
+    # Don't show initial message - keep UI clean
+    # Run the selector silently
     selector = SimpleArrowSelector(columns, preselected)
     selected = selector.run()
     
-    # Show results with Rich
-    console.print(f"[bright_magenta]  ✓ {len(selected)} out of {len(columns)} columns selected[/bright_magenta]")
-    
-    if selected:
-        console.print("\n[bold]Selected columns:[/bold]")
-        
-        # Group for display
-        grouped = {}
-        other = []
-        
-        for col in sorted(selected):
-            if '.' in col:
-                prefix = col.split('.')[0]
-                if prefix not in grouped:
-                    grouped[prefix] = []
-                grouped[prefix].append(col)
-            else:
-                other.append(col)
-        
-        for group, cols in sorted(grouped.items()):
-            console.print(f"\n[bold bright_magenta]{group}:[/bold bright_magenta]")
-            for col in cols:
-                console.print(f"  • {col}")
-        
-        if other:
-            console.print(f"\n[bold bright_magenta]other:[/bold bright_magenta]")
-            for col in other:
-                console.print(f"  • {col}")
+    # Don't show detailed results here - they'll be shown in the Configuration Summary
     
     return selected
 

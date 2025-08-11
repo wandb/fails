@@ -4,7 +4,6 @@ Interactive selector for choosing a configuration file.
 Uses raw terminal mode for arrow-based selection, matching other selectors in the app.
 """
 
-import os
 import sys
 import tty
 import termios
@@ -98,13 +97,12 @@ class ConfigSelector:
             sys.stdout.write("\033[K\033[91mNo configuration files found in ./config/\033[0m\r\n")
             sys.stdout.write("\033[K\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
         else:
-            sys.stdout.write(f"\033[K\033[2mFound {len(self.configs)} evaluation configuration(s), please select one based \
-on the W&B entity and project:\033[0m\r\n")
+            sys.stdout.write(f"\033[KFound \033[95m{len(self.configs)}\033[0m evaluation configuration(s), please select one or create a new configuration:\r\n")
             sys.stdout.write("\033[K\r\n")
 
             # Instructions (matching other selectors' style)
             sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
-            sys.stdout.write("\033[K\033[2m↑/↓ Navigate | Enter Select | q Quit | n New Config\033[0m\r\n")
+            sys.stdout.write("\033[K\033[2m↑/↓: Navigate    Enter: Select    q: Quit    n: New config\033[0m\r\n")
             sys.stdout.write("\033[K\033[2m─────────────────────────────────────────────────────────────────────────────────────────\033[0m\r\n")
             sys.stdout.write("\033[K\r\n")
 

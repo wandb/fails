@@ -122,7 +122,7 @@ def with_spinner(message: str = "Processing"):
                 result = func(*args, **kwargs)
                 spinner.stop(f"{message} complete", success=True)
                 return result
-            except Exception as e:
+            except Exception:
                 spinner.stop(f"{message} failed", success=False)
                 raise
         return wrapper

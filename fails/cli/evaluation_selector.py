@@ -42,7 +42,7 @@ class EvaluationSelector:
         self.example_url = "https://wandb.ai/your-entity/your-project/weave/calls/01985cfc-6d70-711f-89b7-bb22c693ca75"
         self.result = None  # Will be tuple of (entity, project, eval_id)
         self.error_message = ""
-        self.MAX_INPUT_SIZE = 500
+        self.MAX_INPUT_SIZE = 1000
     
     def extract_components_from_url(self, url: str) -> Optional[tuple]:
         """Extract entity, project, and evaluation ID from a Weave URL.
@@ -118,11 +118,11 @@ class EvaluationSelector:
             ('', 'The URL should look like:\n'),
             ('', f'  {self.example_url}...\n'),
             ('', '\n'),
-            ('class:instructions', 'Hint: Click on the Evaluation row in the Evals tab, then copy the URL.\n'),
+            ('class:instructions', 'Hint: Click on the evaluation row in the Evals tab in Weave, then copy the URL.\n'),
             ('', '\n'),
-            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
-            ('class:instructions', "Type 'q' to quit |  Enter to submit |  Ctrl+U to clear |  Ctrl+C to cancel\n"),
-            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
+            ('', '─' * 105 + '\n'),
+            ('class:instructions', "Enter: Submit |  Ctrl+U: Clear |  Ctrl+C: Cancel\n"),
+            ('', '─' * 105 + '\n'),
         ])
         
         # Create a window for error messages
@@ -247,10 +247,10 @@ class EvaluationSelector:
         if result:
             entity, project, eval_id = result
             if entity and project:
-                print(f"\n\033[95m✓\033[0m Extracted from URL:")
-                print(f"  Entity: \033[96m{entity}\033[0m")
-                print(f"  Project: \033[96m{project}\033[0m")
-                print(f"  Evaluation ID: \033[96m{eval_id}\033[0m")
+                print("\n\033[95m✓\033[0m Extracted from URL:")
+                print(f"    Entity: \033[96m{entity}\033[0m")
+                print(f"    Project: \033[96m{project}\033[0m")
+                print(f"    Evaluation ID: \033[96m{eval_id}\033[0m")
             else:
                 print(f"\n\033[95m✓\033[0m Valid Weave Evaluation ID extracted: \033[96m{eval_id}\033[0m")
         

@@ -1,5 +1,4 @@
 import weave
-import pandas as pd
 from weave import Dataset
 import os
 

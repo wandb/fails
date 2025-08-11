@@ -65,12 +65,12 @@ class UserContextCollector:
         header_text = FormattedText([
             ('class:step_header', '\nStep 2: Provide Context\n'),
             ('', '\n'),
-            ('', 'Please provide context about your AI system and evaluation.\n'),
-            ('class:instructions', 'This helps the pipeline better understand and categorize your failures.\n'),
+            ('', 'Please provide context about your AI system and the evaluation you have run.\n'),
+            ('', 'This helps create more specific failure categories for your evaluation.\n'),
             ('', '\n'),
-            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
-            ('class:instructions', "Tab: to switch fields | Enter: submit | Ctrl+C: cancel\n"),
-            ('', '──────────────────────────────────────────────────────────────────────────────────────────────────────\n'),
+            ('', '─' * 105 + '\n'),
+            ('class:instructions', "Tab: Switch fields    Enter: Submit    Ctrl+C: Cancel\n"),
+            ('', '─' * 105 + '\n'),
             ('', '\n'),
         ])
         
@@ -123,7 +123,7 @@ class UserContextCollector:
             Window(FormattedTextControl(text=header_text), height=10),
             left_aligned_system,
             Window(FormattedTextControl(text=system_example), height=2),
-            Window(height=1),  # Spacing
+            Window(height=2),  # Spacing
             left_aligned_eval,
             Window(FormattedTextControl(text=eval_example), height=2),
             ConditionalContainer(
@@ -178,7 +178,7 @@ class UserContextCollector:
             layout=Layout(root_container),
             key_bindings=kb,
             style=style,
-            full_screen=False,
+            full_screen=True,  # Use full screen mode for alternate screen buffer
             mouse_support=True,
         )
         
@@ -191,7 +191,7 @@ class UserContextCollector:
         # Print confirmation if we got valid results
         if result:
             system_context, eval_context = result
-            print(f"\n\033[95m✓\033[0m Context collected successfully")
+            print("\n\033[95m✓\033[0m Context collected successfully")
             print(f"  AI System: \033[96m{system_context[:50]}{'...' if len(system_context) > 50 else ''}\033[0m")
             print(f"  Evaluation: \033[96m{eval_context[:50]}{'...' if len(eval_context) > 50 else ''}\033[0m")
         
