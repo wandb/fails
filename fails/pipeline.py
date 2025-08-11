@@ -1268,7 +1268,6 @@ async def run_pipeline(
                 )
 
         draft_categorization_results_str += "\n" + "=" * 80 + "\n"
-        console.print(f"[bright_magenta]  Reviewing and clustering {len(unique_candidate_categories)} candidate categories...[/bright_magenta]")
         if debug:
             console.print(
                 Panel(
@@ -1277,6 +1276,7 @@ async def run_pipeline(
                     border_style="green",
                 )
             )
+    console.print(f"[bright_magenta]  Reviewing and clustering {len(unique_candidate_categories)} candidate categories...[/bright_magenta]")
 
     if debug:
         console.print(
@@ -1312,7 +1312,7 @@ async def run_pipeline(
         max_concurrent_llm_calls=max_concurrent_llm_calls,
     )
     
-    review_spinner.stop("  ✓ Review completed successfully!", success=True)
+    review_spinner.stop("Review completed successfully", success=True)
 
     if debug:
         console.print("=" * 80)

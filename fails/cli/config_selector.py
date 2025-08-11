@@ -103,7 +103,7 @@ class ConfigSelector:
         
         if not self.configs:
             sys.stdout.write("\033[91mNo configuration files found in ./config/\033[0m\r\n")
-            sys.stdout.write("\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
+            # sys.stdout.write("\033[93mPlease run with --force-eval-select to create a new configuration.\033[0m\r\n")
         else:
             sys.stdout.write(f"Found \033[95m{len(self.configs)}\033[0m evaluation config(s), please select one or create a new config:\r\n")
             sys.stdout.write("\r\n")
@@ -141,7 +141,7 @@ class ConfigSelector:
                     sys.stdout.write(f"{prefix} {info['entity']}/{info['project']}\r\n")
             
             sys.stdout.write("\r\n")
-        
+
         sys.stdout.flush()
         
     def run(self) -> Optional[dict]:
