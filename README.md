@@ -11,7 +11,11 @@
 
 ***Look at your most relevant failures first***
 
-FAILS is a tool for reviewing evaluation failures and categorizing them. The pipeline fetches evaluation data from [Weave](https://weave-docs.wandb.ai/), categorizes failures, clusters them into failure categories and outputs a report with the failure clusters. The goal is not to remove the need to look at your data, but instead try and show the most impactful types of failures happening.
+
+
+FAILS is a tool for reviewing evaluation failures and categorizing them. The pipeline fetches evaluation data from [Weave](https://weave-docs.wandb.ai/), categorizes failures, clusters them into failure categories and outputs a report with the failure clusters. 
+
+The goal is not to remove the need to look at your data, but instead try and show the most impactful types of failures happening.
 
 ## Setup
 
@@ -20,7 +24,7 @@ FAILS is a tool for reviewing evaluation failures and categorizing them. The pip
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Add your model name to .env in [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc:
+2. Add a LLM model name to .env in [LiteLLM](https://docs.litellm.ai/docs/providers) format: `provider/model-name`, e.g. `gemini/gemini-2.5-pro`, `openai/gpt-5` etc:
 
 ```bash
 LLM_MODEL=gemini/gemini-2.5-pro
@@ -40,14 +44,14 @@ OPENAI_API_KEY=your_openai_api_key_here
 ...
 ```
 
-## Run Failure Categorization Pipeline
-
-Analyze evaluation failures and categorize them. The pipeline will ask for a Weave Evaluation URL, some context about your task, and the relevant columns that have been logged to Weave to help with the failure categorization. 
+## Run FAILS
 
 ```bash
 # Run with default model (Gemini 2.5 Pro)
 uv run fails/pipeline.py
 ```
+
+The pipeline will analyze evaluation failures and categorize them. The pipeline will ask for a Weave Evaluation URL, some context about your task, and the relevant columns that have been logged to Weave to help with the failure categorization.
 
 ## Additional options
 You can adjust the pipeline settings either via the env vars in `.env` or via cli arguments:
