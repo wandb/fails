@@ -79,7 +79,7 @@ MAX_CONCURRENT_LLM_CALLS=5           # Max concurrent LLM API calls (default: 20
 
 **Note:** Environment variables are overridden by CLI arguments if both are provided.
 
-## Run the pipeline eval
+## Run the pipeline eval [W&B internal only]
 
 Available evaluations in `evals/`:
 - `speaker_classification/` - Classifies speakers as internal (W&B employees) or external (prospects/users)
