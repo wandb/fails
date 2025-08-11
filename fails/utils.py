@@ -23,16 +23,10 @@ def display_evaluation_summary(
         failure_config: Optional failure filter configuration
         console: Rich console for output
     """
-    op_name = eval_data["evaluation"].get("op_name", "Unknown")
-    # Truncate long op names
-    if len(op_name) > 100:
-        op_name = op_name[:90] + "..."
-
     # Build evaluation info
-    eval_info = f"""[bold green]Evaluation ID:[/bold green] {eval_data["evaluation"]["id"]}
-[bold green]Op Name:[/bold green] {op_name}
-[bold green]Total traces:[/bold green] {eval_data["trace_count"]["total"]}
-[bold green]Direct children:[/bold green] {eval_data["trace_count"].get("direct_children", 0)}"""
+    eval_info = f"""[bold cyan]Evaluation ID:[/bold cyan] {eval_data["evaluation"]["id"]}
+[bold cyan]Total traces:[/bold cyan] {eval_data["trace_count"]["total"]}
+[bold cyan]Direct children:[/bold cyan] {eval_data["trace_count"].get("direct_children", 0)}"""
 
     # If we have a failure filter, add info about filtered results
     if failure_config:
@@ -56,10 +50,10 @@ def display_evaluation_summary(
             else:
                 filter_display = f"{failure_config['failure_column']} {op_symbol} {op_value}"
         
-        eval_info += f"\n[bold green]Failure filter:[/bold green] {filter_display}"
-        eval_info += f"\n[bold green]Filtered children:[/bold green] {len(eval_data.get('children', []))}"
+        eval_info += f"\n[bold cyan]Failure filter:[/bold cyan] {filter_display}"
+        eval_info += f"\n[bold cyan]Filtered children:[/bold cyan] {len(eval_data.get('children', []))}"
 
-    console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="green"))
+    console.print(Panel(eval_info, title="📊 Evaluation Summary", border_style="white"))
 
     # Show evaluation summary if available
     if "summary" in eval_data["evaluation"]:
@@ -138,13 +132,10 @@ def prepare_trace_data_for_pipeline(
             console.print(
                 f"[dim]First child keys:[/dim] {', '.join(eval_data['children'][0].keys())}\n"
             )
-        
-        if debug:
             console.print("\n[dim]CHILDREN:[/dim]")
             console.print(
                 f"[dim]{len(eval_data['children'])} children found, sampling first {n_samples}:[/dim]\n"
             )
-            eval_data["children"] = eval_data["children"][:n_samples]
         
         for i, trace in enumerate(eval_data["children"]):
             # Format trace entry for pipeline
@@ -312,6 +303,8 @@ def generate_evaluation_report(
     final_classification_results: List[FinalClassificationResult],
     all_categories: List[Category],
     eval_name: str,
+    wandb_entity: str = None,
+    wandb_project: str = None,
 ) -> str:
     """
     Generate an evaluation report from classification results.
@@ -320,9 +313,11 @@ def generate_evaluation_report(
         final_classification_results: List of classification results
         all_categories: List of all available categories
         eval_name: Name of the evaluation
+        wandb_entity: W&B entity for generating trace URLs
+        wandb_project: W&B project for generating trace URLs
 
     Returns:
-        Formatted report string
+        Formatted report string with Rich formatting
     """
     # Create a summary of classifications
     classification_summary = {}
@@ -349,10 +344,16 @@ def generate_evaluation_report(
         classification_summary.items(), key=lambda x: len(x[1]["traces"]), reverse=True
     )
 
+    # Helper function to create trace URL
+    def get_trace_url(trace_id):
+        if wandb_entity and wandb_project:
+            return f"https://wandb.ai/{wandb_entity}/{wandb_project}/weave/calls/{trace_id}"
+        return trace_id
+
     # Generate report
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    report = f"## {eval_name} Evaluation Report - {current_time}\n\n"
+    report = f"[bold bright_cyan]## {eval_name} Evaluation Report[/bold bright_cyan] [dim]- {current_time}[/dim]\n\n"
 
     # Add summary table to the report
     # Calculate max widths for alignment
@@ -363,8 +364,8 @@ def generate_evaluation_report(
     max_category_width = max(max_category_width, len("Category"))
 
     # Create the table header
-    report += f"{'Category'.ljust(max_category_width)} | {'Count'.center(10)} | {'Percentage'.center(12)}\n"
-    report += f"{'-' * max_category_width} | {'-' * 10} | {'-' * 12}\n"
+    report += f"[bold cyan]{'Category'.ljust(max_category_width)} | {'Count'.center(10)} | {'Percentage'.center(12)}[/bold cyan]\n"
+    report += f"[dim]{'-' * max_category_width} | {'-' * 10} | {'-' * 12}[/dim]\n"
 
     # Add table rows
     for category_name, category_data in sorted_categories:
@@ -373,10 +374,18 @@ def generate_evaluation_report(
         percentage = (count / total_failures) * 100
         display_name = category_name.replace("_", " ").title()
 
-        report += f"{display_name.ljust(max_category_width)} | {str(count).center(10)} | {f'{percentage:.1f}%'.center(12)}\n"
+        # Color the count based on percentage (higher percentages in brighter colors)
+        if percentage >= 30:
+            count_color = "bright_magenta"
+        elif percentage >= 10:
+            count_color = "yellow"
+        else:
+            count_color = "white"
+        
+        report += f"{display_name.ljust(max_category_width)} | [{count_color}]{str(count).center(10)}[/{count_color}] | {f'{percentage:.1f}%'.center(12)}\n"
 
     report += "\n"
-    report += f"### Failure Categories:\n\n"
+    report += f"[bold bright_cyan]### Failure Categories:[/bold bright_cyan]\n\n"
 
     for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
         traces = category_data["traces"]
@@ -387,8 +396,8 @@ def generate_evaluation_report(
         # Format category name for display
         display_name = category_name.replace("_", " ").title()
 
-        report += f"{idx}. **{display_name}**\n\n"
-        report += f"Count: {count} ({percentage:.1f}% of failures)\n\n"
+        report += f"[bold bright_cyan]{idx}.[/bold bright_cyan] [bold bright_magenta]{display_name}[/bold bright_magenta]\n\n"
+        report += f"[cyan]Count:[/cyan] {count} ({percentage:.1f}% of failures)\n\n"
 
         if category_info:
             report += f"{category_info.failure_category_definition}\n\n"
@@ -396,26 +405,31 @@ def generate_evaluation_report(
         # Add examples section only if there are notes to show
         has_examples = any(trace["notes"] for trace in traces[:5])
         if has_examples:
-            report += "Examples:\n\n"
+            report += "[cyan]Examples:[/cyan]\n\n"
 
-            # Show up to 5 example trace IDs and notes
+            # Show up to 5 example trace IDs and notes with clickable URLs
             for i, trace in enumerate(traces[:5]):
                 if trace["notes"]:
-                    report += f"  Trace: {trace['trace_id']}\n"
-                    report += f"  {trace['notes']}\n"
+                    trace_url = get_trace_url(trace['trace_id'])
+                    report += f"  [dim]Trace:[/dim] [link={trace_url}]{trace['trace_id']}[/link]\n"
+                    report += f"  [dim]{trace['notes']}[/dim]\n"
                     if i < min(4, len(traces) - 1):
                         report += "\n"
 
-        # Add list of all trace IDs for this category
-        report += f"\nTrace IDs for this category:\n"
+        # Add list of all trace IDs for this category as a Python list
+        report += f"\n[cyan]Trace IDs for this category (Python list for easy copy-paste):[/cyan]\n"
+        report += "[dim][\n"
+        trace_ids_with_links = []
         for trace in traces:
-            report += f"- {trace['trace_id']}\n"
-        report += "\n"
+            trace_url = get_trace_url(trace['trace_id'])
+            # Add the clickable ID to list
+            trace_ids_with_links.append(f'    "[link={trace_url}]{trace["trace_id"]}[/link]"')
+        report += ",\n".join(trace_ids_with_links)
+        report += "\n][/dim]\n\n"
 
         if idx < len(sorted_categories):
             report += "\n"
 
-    report += "~" * 80 + "\n\n"
-    report += "END REPORT\n"
+    report += "[bold bright_magenta]END REPORT[/bold bright_magenta]\n"
 
     return report

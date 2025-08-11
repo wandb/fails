@@ -21,6 +21,8 @@ from rich.table import Table
 
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fails.cli.column_context_selector import simple_arrow_selection
+from fails.cli.config_selector import select_config
+from fails.cli.evaluation_selector import interactive_evaluation_selection
 from fails.cli.failure_selector import interactive_failure_column_selection
 from fails.prompts import (
     CLUSTERING_PROMPT,
@@ -43,6 +45,7 @@ from fails.utils import (
     prepare_trace_data_for_pipeline,
     validate_failure_column,
 )
+from fails.spinner import FailsSpinner
 from fails.weave_query import (
     TraceDepth,
     filter_evaluation_data_columns,
@@ -56,11 +59,34 @@ set_tracing_disabled(True)
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
 
-api_key = os.getenv("GOOGLE_API_KEY")
-if api_key:
-    os.environ["LLM_API_KEY"] = api_key
-else:
-    raise ValueError("GOOGLE_API_KEY environment variable not set")
+
+def get_api_key_for_model(model: str) -> str:
+    """Get the appropriate API key based on the model provider.
+    
+    LiteLLM uses format: provider/model-name
+    """
+    provider = model.split('/')[0].lower() if '/' in model else 'openai'
+    
+    # Map provider prefixes to environment variable names
+    provider_env_map = {
+        'openai': 'OPENAI_API_KEY',
+        'anthropic': 'ANTHROPIC_API_KEY',
+        'claude': 'ANTHROPIC_API_KEY',
+        'gemini': 'GOOGLE_API_KEY',
+        'google': 'GOOGLE_API_KEY',
+        'vertex_ai': 'GOOGLE_API_KEY',
+        'cohere': 'COHERE_API_KEY',
+        'replicate': 'REPLICATE_API_KEY',
+        'azure': 'AZURE_API_KEY',
+    }
+    
+    env_var = provider_env_map.get(provider, 'OPENAI_API_KEY')
+    api_key = os.getenv(env_var)
+    
+    if not api_key:
+        raise ValueError(f"{env_var} environment variable not set for model {model}")
+    
+    return api_key
 
 
 @dataclass
@@ -69,14 +95,16 @@ class Args:
 
     model: str = "gemini/gemini-2.5-pro"
     debug: bool = False
-    force_column_selection: bool = False  # Force re-selection of both failure column and context columns
+    force_eval_select: bool = False  # Force selection of evaluation URL and columns
     config_file: str = "./config/failure_categorization_config.yaml"
-    wandb_entity: str = "wandb-applied-ai-team"
-    wandb_project: str = "eval-failures"
+    test_config: str | None = None  # Optional test config file
+    wandb_entity: str | None = None  # Will be extracted from URL or provided via CLI
+    wandb_project: str | None = None  # Will be extracted from URL or provided via CLI
     wandb_logging_entity: str = "wandb-applied-ai-team"
     wandb_logging_project: str = "eval-failures-testing"
     n_samples: int | None = None
-    max_concurrent_llm_calls: int = 100  # Control concurrent LLM API calls
+    max_concurrent_llm_calls: int = 20  # Control concurrent LLM API calls
+    eval_id: str | None = None  # Optional evaluation ID to skip interactive selection
 
 
 @weave.op
@@ -94,12 +122,6 @@ def interactive_column_selection(
     Returns:
         Set of selected columns
     """
-    # Add parent directory to path to find the selector module
-
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-
     return simple_arrow_selection(console, columns, preselected)
 
 
@@ -186,7 +208,7 @@ def save_column_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    console.print(f"[green]✓ Saved column preferences to {config_file}[/green]")
+    console.print(f"[bright_magenta]  ✓ Saved column preferences to {config_file}[/bright_magenta]")
 
 
 @weave.op
@@ -301,7 +323,7 @@ def save_failure_column_preferences(
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    console.print(f"[green]✓ Saved failure column preferences to {config_file}[/green]")
+    console.print(f"[bright_magenta]✓[/bright_magenta] [green]Saved failure column preferences to {config_file}[/green]")
 
 
 @weave.op
@@ -311,7 +333,7 @@ def get_column_preferences(
     wandb_project: str,
     eval_id: str,
     console: Console,
-    force_column_selection: bool = False,
+    force_eval_select: bool = False,
     debug: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[List[str]]]:
     """
@@ -323,7 +345,7 @@ def get_column_preferences(
         wandb_project: Weave project name
         eval_id: Evaluation ID
         console: Rich console instance
-        force_column_selection: Force re-selection of columns
+        force_eval_select: Force re-selection of columns
         debug: Debug mode
 
     Returns:
@@ -332,7 +354,7 @@ def get_column_preferences(
         - columns_list: List of column names for data extraction
     """
     # First, handle failure column selection
-    console.print("\n[bold blue]🔍 Failure Column Configuration[/bold blue]")
+    console.print("\n[bold cyan]Step 2: Select Failure Filter[/bold cyan]")
 
     # Get all available columns first
     column_info = get_available_columns(
@@ -369,7 +391,7 @@ def get_column_preferences(
     )
     failure_config = None
 
-    if saved_failure_config and not force_column_selection:
+    if saved_failure_config and not force_eval_select:
         # Use saved failure column preferences
         filter_desc = ""
         failure_filter = saved_failure_config.get('failure_filter', {})
@@ -395,17 +417,22 @@ def get_column_preferences(
         failure_config = saved_failure_config
     else:
         # Perform failure column selection
-        if saved_failure_config and force_column_selection:
+        if saved_failure_config and force_eval_select:
             console.print(
-                "[yellow]Force selection enabled - overriding saved failure column[/yellow]"
+                "[dim]Force selection enabled - overriding saved failure column[/dim]"
             )
         else:
-            console.print("[yellow]No saved failure column preferences found[/yellow]")
+            console.print("[dim]No saved failure column preferences found[/dim]")
 
         # Interactive failure column selection
         failure_column, failure_value = interactive_failure_column_selection(
             console, all_columns, sample_values
         )
+        
+        # Handle user cancellation
+        if failure_column is None:
+            console.print("[red]Exiting: Failure column selection was cancelled.[/red]")
+            return
 
         if failure_column and failure_value is not None:
             # Build the failure config
@@ -433,7 +460,7 @@ def get_column_preferences(
     # Now handle regular column selection
     saved_columns = load_column_preferences(config_file, wandb_entity, wandb_project)
 
-    if saved_columns and not force_column_selection:
+    if saved_columns and not force_eval_select:
         # Use saved preferences
         selected_columns = set(saved_columns)
 
@@ -453,7 +480,7 @@ def get_column_preferences(
         combined_content = ""
         
         # Add failure filter section if we have saved failure config
-        if saved_failure_config and not force_column_selection:
+        if saved_failure_config and not force_eval_select:
             filter_desc = ""
             failure_filter = saved_failure_config.get('failure_filter', {})
             
@@ -481,7 +508,7 @@ def get_column_preferences(
         # Add column configuration section
         combined_content += "[bold]📊 Column Configuration[/bold]\n"
         combined_content += f"[green]Using {len(selected_columns)} saved columns for {wandb_entity}/{wandb_project}[/green]\n\n"
-        combined_content += "[dim]To re-select both failure and context columns, re-run with --force-column-selection[/dim]\n"
+        combined_content += "[dim]To re-select evaluation, failure and context columns, re-run with --force-eval-selection[/dim]\n"
 
         # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
@@ -511,18 +538,19 @@ def get_column_preferences(
 
     else:
         # Perform column selection
-        console.print("\n[bold blue]📋 Column Selection[/bold blue]")
+        console.print("\n[bold cyan]Step 3: Select Context Columns[/bold cyan]")
 
-        if saved_columns and force_column_selection:
-            console.print(
-                "[yellow]Force selection enabled - overriding saved preferences[/yellow]"
-            )
-        elif not saved_columns:
-            console.print(
-                "[yellow]No saved preferences found for this project[/yellow]"
-            )
+        if debug:
+            if saved_columns and force_eval_select:
+                console.print(
+                    "[dim]Force selection enabled - overriding saved preferences[/dim]"
+                )
+            elif not saved_columns:
+                console.print(
+                    "[dim]No saved preferences found for this project[/dim]"
+                )
 
-        console.print("Using discovered columns for selection...")
+            console.print("[dim]Using discovered columns for selection...[/dim]")
 
         # Filter columns based on user requirements
         # Define metadata columns to exclude (not relevant for analysis)
@@ -589,7 +617,7 @@ def get_column_preferences(
             console, filtered_columns, preselected
         )
 
-        console.print(f"\n[green]✅ Selected {len(selected_columns)} columns[/green]")
+        console.print(f"\n[bright_magenta]  ✓ Selected {len(selected_columns)} columns[/bright_magenta]")
 
         # Save preferences
         save_column_preferences(
@@ -622,12 +650,12 @@ def get_column_preferences(
                     filter_desc = f"{op_symbol} {op_value}"
             
             combined_content += "[bold]🔎 Failure Filter Configuration[/bold]\n"
-            combined_content += f"[green]New failure column configuration[/green]\n"
+            combined_content += f"[bright_magenta]New failure column configuration[/bright_magenta]\n"
             combined_content += f"Filter: [cyan]{failure_config['failure_column']}[/cyan] {filter_desc}\n\n"
         
         # Add column configuration section
         combined_content += "[bold]📊 Column Configuration[/bold]\n"
-        combined_content += f"[green]Selected {len(selected_columns)} columns[/green]\n"
+        combined_content += f"[bright_magenta]Selected {len(selected_columns)} columns[/bright_magenta]\n"
         
         # Group columns for display
         grouped = {}
@@ -644,14 +672,14 @@ def get_column_preferences(
         # Add grouped columns to content
         for prefix in sorted(grouped.keys()):
             cols = grouped[prefix]
-            combined_content += f"\n[yellow]{prefix}[/yellow] ({len(cols)} columns):\n"
+            combined_content += f"\n[bright_magenta]{prefix}[/bright_magenta] ({len(cols)} columns):\n"
             for col in cols[:5]:  # Show up to 5 columns
                 combined_content += f"  • {col}\n"
             if len(cols) > 5:
                 combined_content += f"  ... and {len(cols) - 5} more\n"
         
         if other_cols:
-            combined_content += f"\n[yellow]Top-level[/yellow] ({len(other_cols)} columns):\n"
+            combined_content += f"\n[bright_magenta]Top-level[/bright_magenta] ({len(other_cols)} columns):\n"
             for col in other_cols:
                 combined_content += f"  • {col}\n"
         
@@ -660,7 +688,7 @@ def get_column_preferences(
             Panel(
                 combined_content.rstrip(),
                 title="📊 Configuration Summary",
-                border_style="green",
+                border_style="white",
                 padding=(1, 2),
             )
         )
@@ -715,15 +743,14 @@ async def draft_categorization(
     evaluation_evaluation_or_scorer_data: str | dict,
     user_context: str,
     model: str,
-    max_concurrent_llm_calls: int,
+    llm_semaphore: Semaphore,
     debug: bool = False,
 ) -> FirstPassCategorizationResult:
-    llm_semaphore = Semaphore(max_concurrent_llm_calls)
     async with llm_semaphore:
         draft_categorization_llm = Agent(
             name="Row by Row",
             instructions=FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            model=LitellmModel(model=model, api_key=get_api_key_for_model(model)),
             output_type=FirstPassCategorization,
         )
 
@@ -756,7 +783,10 @@ async def run_draft_categorization(
     max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> list[FirstPassCategorizationResult]:
-    # Create tasks with trace_id
+    # Create shared semaphore for all draft categorization tasks
+    llm_semaphore = Semaphore(max_concurrent_llm_calls)
+    
+    # Create tasks with trace_id and shared semaphore
     tasks = [
         draft_categorization(
             trace_id=trace_entry["id"],
@@ -766,7 +796,7 @@ async def run_draft_categorization(
             user_context=user_context,
             model=model,
             debug=debug,
-            max_concurrent_llm_calls=max_concurrent_llm_calls,
+            llm_semaphore=llm_semaphore,
         )
         for trace_entry in trace_data
     ]
@@ -812,14 +842,13 @@ async def final_classification(
     user_context: str,
     available_categories_str: str,
     model: str,
-    max_concurrent_llm_calls: int,
+    llm_semaphore: Semaphore,
 ) -> FinalClassificationResult:
-    llm_semaphore = Semaphore(max_concurrent_llm_calls)
     async with llm_semaphore:
         final_classification_llm = Agent(
             name="Final Classification",
             instructions=FINAL_CLASSIFICATION_SYSTEM_PROMPT,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            model=LitellmModel(model=model, api_key=get_api_key_for_model(model)),
             output_type=FinalClassification,
         )
 
@@ -855,6 +884,9 @@ async def run_final_classification(
     max_concurrent_llm_calls: int,
     debug: bool = False,
 ) -> list[FinalClassificationResult]:
+    # Create shared semaphore for all final classification tasks
+    llm_semaphore = Semaphore(max_concurrent_llm_calls)
+    
     classification_tasks = [
         final_classification(
             trace_id=trace_entry["id"],
@@ -864,7 +896,7 @@ async def run_final_classification(
             user_context=user_context,
             available_categories_str=available_categories_str,
             model=model,
-            max_concurrent_llm_calls=max_concurrent_llm_calls,
+            llm_semaphore=llm_semaphore,
         )
         for trace_entry in trace_data
     ]
@@ -908,7 +940,7 @@ async def aggregate_categorizations(
         review_categorizations_llm = Agent(
             name="Review Agent",
             instructions=clustering_system_prompt_str,
-            model=LitellmModel(model=model, api_key=os.environ["LLM_API_KEY"]),
+            model=LitellmModel(model=model, api_key=get_api_key_for_model(model)),
             output_type=ClusteringCategories,
         )
 
@@ -930,9 +962,8 @@ async def run_pipeline(
     console: Console = Console(),
 ) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
-    console.print(
-        f"[bold blue]📝 STEP 1: Starting draft categorization for {len(trace_data)} traces[/bold blue]"
-    )
+    console.print("\n[bold cyan]Step 1: Draft Categorization[/bold cyan]")
+    console.print(f"[bright_magenta]  Starting draft categorization for {len(trace_data)} traces...[/bright_magenta]")
 
     if debug:
         first_pass_categorization_prompt_str = (
@@ -960,6 +991,10 @@ async def run_pipeline(
             )
         )
 
+    # Start spinner for draft categorization
+    draft_spinner = FailsSpinner(f"Categorizing {len(trace_data)} failure traces")
+    draft_spinner.start()
+    
     draft_categorization_results = await run_draft_categorization(
         trace_data=trace_data,
         user_context=user_context,
@@ -969,19 +1004,16 @@ async def run_pipeline(
     )
 
     num_draft_categorizations = len(draft_categorization_results)
+    
+    draft_spinner.stop(f"Completed {num_draft_categorizations} draft categorizations", success=True)
 
     # Create a nice display for draft categorization results
-    console.print(
-        Panel(
-            f"[bold green]✅ Completed {num_draft_categorizations} draft categorizations[/bold green]",
-            title="Draft Categorization Results",
-            border_style="green",
-        )
-    )
+    console.print(f"[bright_magenta]  ✓ Completed {num_draft_categorizations} draft categorizations[/bright_magenta]")
 
     # ----------------- STEP 2: Review categorizations -----------------
 
-    console.print("\n[bold blue]🔍 STEP 2: Reviewing categorizations...[/bold blue]")
+    console.print("\n[bold cyan]Step 2: Review & Clustering[/bold cyan]")
+    console.print("[bright_magenta]  Reviewing and clustering categorizations...[/bright_magenta]")
 
     # Create resclustering prompt (needed for the agent)
     draft_categorization_results_str = "\n" + "=" * 80 + "\n"
@@ -1041,6 +1073,10 @@ async def run_pipeline(
             )
         )
 
+    # Start spinner for review
+    review_spinner = FailsSpinner("Clustering and reviewing failure categories")
+    review_spinner.start()
+    
     review_data = await aggregate_categorizations(
         draft_categorization_results_str=draft_categorization_results_str,
         num_draft_categorizations=num_draft_categorizations,
@@ -1049,32 +1085,28 @@ async def run_pipeline(
         debug=debug,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
     )
+    
+    review_spinner.stop("Review completed successfully", success=True)
 
     # Pretty print the review result
-    console.print(
-        Panel(
-            "[bold green]✨ Review completed successfully![/bold green]",
-            title="Review Result",
-            border_style="green",
-        )
-    )
+    console.print("[bright_magenta]  ✓ Review completed successfully![/bright_magenta]")
 
-    console.print("=" * 80)
-    console.print("Candidate categories:")
-    console.print("-" * 80)
-    console.print(review_data.category_long_list_thinking)
-    console.print("-" * 80)
-    for category in review_data.task_failure_categories:
-        console.print(f"Category: {category.failure_category_name}")
-        console.print(f"Description: {category.failure_category_definition}")
-        console.print(f"Notes: {category.failure_category_notes}")
+    if debug:
+        console.print("=" * 80)
+        console.print("Candidate categories:")
         console.print("-" * 80)
+        console.print(review_data.category_long_list_thinking)
+        console.print("-" * 80)
+        for category in review_data.task_failure_categories:
+            console.print(f"Category: {category.failure_category_name}")
+            console.print(f"Description: {category.failure_category_definition}")
+            console.print(f"Notes: {category.failure_category_notes}")
+            console.print("-" * 80)
 
     # ----------------- STEP 3: Final classification -----------------
 
-    console.print(
-        "\n[bold blue]🎯 STEP 3: Final classification of failures...[/bold blue]"
-    )
+    console.print("\n[bold cyan]Step 3: Final Classification[/bold cyan]")
+    console.print("[bright_magenta]  Performing final classification of failures...[/bright_magenta]")
 
     # Add "other" category to the list
     all_categories = review_data.task_failure_categories + [
@@ -1118,6 +1150,10 @@ async def run_pipeline(
             )
         )
 
+    # Start spinner for final classification
+    classification_spinner = FailsSpinner(f"Classifying {len(trace_data)} failures into categories")
+    classification_spinner.start()
+    
     classification_results_per_trace = await run_final_classification(
         trace_data=trace_data,
         user_context=user_context,
@@ -1126,6 +1162,8 @@ async def run_pipeline(
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
     )
+    
+    classification_spinner.stop(f"Classification complete", success=True)
 
     return PipelineResult(
         failure_categories=all_categories,
@@ -1144,13 +1182,15 @@ async def run_extract_and_classify_pipeline(
     config_file_path: str,
     wandb_entity: str,
     wandb_project: str,
-    force_column_selection: bool = False,
+    force_eval_select: bool = False,
     n_samples: int | None = None,
 ) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
 
-    console.print("[bold cyan]🔍 Fetching evaluation trace...[/bold cyan]")
+    # Start spinner for fetching evaluation
+    spinner = FailsSpinner("Fetching evaluation trace")
+    spinner.start()
 
     if debug:
         console.print(
@@ -1164,11 +1204,14 @@ async def run_extract_and_classify_pipeline(
         Panel(
             user_context,
             title="📝 User Context",
-            border_style="yellow",
+            border_style="white",
             padding=(1, 2),
         )
     )
 
+    # Stop spinner before interactive selection
+    spinner.stop("Evaluation trace fetched", success=True)
+    
     # ----------------- Column Selection -----------------
 
     # Check for saved column preferences
@@ -1178,10 +1221,14 @@ async def run_extract_and_classify_pipeline(
         wandb_project=wandb_project,
         eval_id=eval_id,
         debug=debug,
-        force_column_selection=force_column_selection,
+        force_eval_select=force_eval_select,
         console=console,
     )
 
+    # Start spinner for data fetching
+    data_spinner = FailsSpinner("Querying evaluation data")
+    data_spinner.start()
+    
     eval_data = query_evaluation_data(
         eval_id=eval_id,
         wandb_entity=wandb_entity,
@@ -1196,12 +1243,15 @@ async def run_extract_and_classify_pipeline(
         if failure_config
         else None,
     )
+    
+    data_spinner.stop("Evaluation data retrieved", success=True)
 
     # ----------------- Data Processing -----------------
     # Filter the evaluation data to only include selected columns
-    console.print(
-        f"[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
-    )
+    if debug:
+        console.print(
+            f"[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
+        )
     eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
 
     # Display evaluation summary
@@ -1216,7 +1266,7 @@ async def run_extract_and_classify_pipeline(
         eval_data, debug, console, n_samples=n_samples
     )
 
-    console.print("\n[bold cyan]" + "═" * 50 + "[/bold cyan]\n")
+    console.print("")  # Add spacing before pipeline execution
 
     # ----------------- Pipeline Execution -----------------
     pipeline_result = await run_pipeline(
@@ -1232,20 +1282,27 @@ async def run_extract_and_classify_pipeline(
 
     # ----------------- Generate Evaluation Report -----------------
 
-    console.print("\n[bold blue]📊 STEP 4: Generating evaluation report...[/bold blue]")
+    console.print("\n[bold cyan]Step 4: Report Generation[/bold cyan]")
+    console.print("[bright_magenta]  Generating evaluation report...[/bright_magenta]")
 
     report = generate_evaluation_report(
         final_classification_results=final_classification_results,
         all_categories=all_categories,
         eval_name=eval_data["evaluation"].get("display_name", eval_id),
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
     )
 
     # Display the report
-    console.print("\n" + "=" * 80)
-    console.print(report)
-    console.print("=" * 80)
+    console.print("")  # Add spacing
+    console.print(Panel(
+        report,
+        title="📊 Evaluation Report",
+        border_style="white",
+        padding=(1, 2),
+    ))
 
-    console.print("\n[bold green]✅ Pipeline completed successfully![/bold green]")
+    console.print("\n[bright_magenta]✓ Pipeline completed successfully![/bright_magenta]")
 
     pipeline_result.report = report
 
@@ -1266,22 +1323,100 @@ if __name__ == "__main__":
     # Create console instance for welcome message
     console = Console()
     
-    # Print welcome message
-    console.print("""
-     ┌───────────────────────────────────────────────────────────────────────┐
-     │                                                                       │
-     │                  ███████╗ █████╗ ██╗██╗     ███████╗                  │
-     │                  ██╔════╝██╔══██╗██║██║     ██╔════╝                  │
-     │                  █████╗  ███████║██║██║     ███████╗                  │
-     │                  ██╔══╝  ██╔══██║██║██║     ╚════██║                  │
-     │                  ██║     ██║  ██║██║███████╗███████║                  │
-     │                  ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚══════╝                  │
-     │                                                                       │
-     │                                                                       │
-     └───────────────────────────────────────────────────────────────────────┘
-    """, style="bold cyan")
+    # Print welcome message with electric pink border and cyan text
+    console.print("[bold bright_magenta]   ┌───────────────────────────────────────────────────────────────────────┐[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]███████╗ █████╗ ██╗██╗     ███████╗[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██╔════╝██╔══██╗██║██║     ██╔════╝[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]█████╗  ███████║██║██║     ███████╗[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██╔══╝  ██╔══██║██║██║     ╚════██║[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]██║     ██║  ██║██║███████╗███████║[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                  [bold cyan]╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚══════╝[/bold cyan]                  [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   │[/bold bright_magenta]                                                                       [bold bright_magenta]│[/bold bright_magenta]")
+    console.print("[bold bright_magenta]   └───────────────────────────────────────────────────────────────────────┘[/bold bright_magenta]")
     
-    eval_id = "0197a72d-2704-7ced-8c07-0fa1e0ab0557"
+    args: Args = simple_parsing.parse(Args)
+    
+    # Load test config if specified
+    test_config = None
+    if args.test_config:
+        with open(args.test_config, 'r') as f:
+            test_config = yaml.safe_load(f)
+    
+    # Determine evaluation ID
+    eval_id = args.eval_id  # Command-line arg takes precedence
+    
+    console = Console()
+    
+    if not eval_id and test_config and test_config.get('test_mode', {}).get('enabled'):
+        # Use test config if in test mode
+        if test_config.get('test_mode', {}).get('skip_eval_selection'):
+            eval_id = test_config.get('test_evaluation_id')
+            console.print(f"[yellow]Test mode: Using evaluation ID from config: {eval_id}[/yellow]")
+        
+    # Variables to hold extracted components
+    wandb_entity_extracted = None
+    wandb_project_extracted = None
+    selected_config_path = None
+    
+    # Check if we need to select a configuration
+    if not eval_id and not args.force_eval_select and not args.wandb_entity and not args.wandb_project:
+        # No explicit config provided, show selector
+        console.print("")  # Add space after logo
+        config_result = select_config("./config")
+        
+        if config_result:
+            if config_result.get('force_selection'):
+                # User chose to create new config
+                args.force_eval_select = True
+            else:
+                # User selected an existing config
+                selected_config_path = config_result['filepath']
+                wandb_entity_extracted = config_result['entity']
+                wandb_project_extracted = config_result['project']
+                
+                # Load the config but don't get evaluation ID (user should provide fresh one)
+                # This ensures we use the saved columns/filters but get a new evaluation
+                console.print(f"[dim]Loaded configuration for {wandb_entity_extracted}/{wandb_project_extracted}[/dim]")
+                # Force evaluation selection to get the current eval ID
+                args.force_eval_select = True
+        else:
+            console.print("[yellow]No configuration selected. Exiting.[/yellow]")
+            sys.exit(0)
+    
+    if not eval_id:
+        # Interactive selection if --force_eval_select is used or forced from config selector
+        if args.force_eval_select:
+            console.print("\n[bold cyan]Step 1: Enter Weave Evaluation URL[/bold cyan]")
+            try:
+                result = interactive_evaluation_selection(console)
+                if not result:
+                    console.print("[red]No evaluation selected. Exiting.[/red]")
+                    sys.exit(1)
+                # Extract components from result
+                entity, project, eval_id = result
+                if entity and project:
+                    wandb_entity_extracted = entity
+                    wandb_project_extracted = project
+                    console.print(f"[dim]Extracted from URL: {entity}/{project}[/dim]")
+            except Exception as e:
+                console.print(f"[red]Error during evaluation selection: {str(e)}[/red]")
+                console.print("[yellow]Please try again with a valid evaluation URL.[/yellow]")
+                sys.exit(1)
+    
+    # Override settings from test config if available
+    if test_config and test_config.get('test_mode', {}).get('enabled'):
+        test_settings = test_config.get('test_mode', {})
+        if test_settings.get('n_samples') and not args.n_samples:
+            args.n_samples = test_settings.get('n_samples')
+        if test_settings.get('model') and args.debug:  # Only override model in debug mode
+            model = test_settings.get('model')
+        else:
+            model = args.model
+    else:
+        model = args.model
 
     # User AI System Context
     USER_AI_SYSTEM_CONTEXT = """My app is trying to idenify insights from transcripts of \
@@ -1309,11 +1444,22 @@ What the user is trying to evaluate in their AI system:
 
 """
 
-    model = "gemini/gemini-2.5-pro"
 
-    args: Args = simple_parsing.parse(Args)
-
-    args.config_file = f"./config/{args.wandb_entity}_{args.wandb_project}_config.yaml"
+    # Use extracted entity/project if available, otherwise use args
+    final_wandb_entity = wandb_entity_extracted or args.wandb_entity
+    final_wandb_project = wandb_project_extracted or args.wandb_project
+    
+    # Validate that we have entity and project
+    if not final_wandb_entity or not final_wandb_project:
+        console.print("[red]Error: W&B entity and project are required.[/red]")
+        console.print("[yellow]These should be extracted from the evaluation URL or provided via --wandb-entity and --wandb-project[/yellow]")
+        sys.exit(1)
+    
+    # Use selected config path if available, otherwise construct from entity/project
+    if selected_config_path:
+        args.config_file = selected_config_path
+    else:
+        args.config_file = f"./config/{final_wandb_entity}_{final_wandb_project}_config.yaml"
 
     if not user_context_str:
         raise ValueError(
@@ -1333,9 +1479,9 @@ What the user is trying to evaluate in their AI system:
             model=model,
             max_concurrent_llm_calls=args.max_concurrent_llm_calls,
             config_file_path=args.config_file,
-            force_column_selection=args.force_column_selection,
-            wandb_entity=args.wandb_entity,
-            wandb_project=args.wandb_project,
+            force_eval_select=args.force_eval_select,
+            wandb_entity=final_wandb_entity,
+            wandb_project=final_wandb_project,
             n_samples=args.n_samples,
         )
     )

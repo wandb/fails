@@ -12,6 +12,10 @@ from rich.panel import Panel
 import json
 
 
+class UserCancelledException(Exception):
+    """Exception raised when user cancels the selection."""
+
+
 class FailureColumnSelector:
     """Interactive selector for choosing a failure column and filter value."""
     
@@ -196,6 +200,10 @@ class FailureColumnSelector:
     
     def run(self) -> Tuple[Optional[str], Optional[Any]]:
         """Run the selector and return (column, filter_value)."""
+        # Check if we're in an interactive terminal
+        if not sys.stdin.isatty():
+            raise RuntimeError("Interactive selection requires a TTY. Use --no-interactive flag or provide filter via command line.")
+        
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         
@@ -223,7 +231,12 @@ class FailureColumnSelector:
                         break
                 else:
                     break
-                    
+        except UserCancelledException:
+            # Clean up terminal before re-raising
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            sys.stdout.write("\033[?25h\033[?1049l")
+            sys.stdout.flush()
+            raise
         finally:
             # Restore terminal
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -263,10 +276,14 @@ class FailureColumnSelector:
         # Header with rounded box
         write_line()
         write_line("  ╭" + "─" * 92 + "╮")
-        write_line("  │  \033[1m🔍 1. Failure Column Selection\033[0m" + " " * 60 + "│")
+        write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
         write_line("  │" + " " * 92 + "│")
-        write_line("  │  Select the column that indicates evaluation failures." + " " * 37 + "│")
-        write_line("  │  Traces will be filtered based on the selected column." + " " * 37 + "│")
+        write_line("  │  \033[1m🔍 2a. Column Selection\033[0m" + " " * 67 + "│")
+        write_line("  │" + " " * 92 + "│")
+        write_line("  │  Select the 1 column that indicates there was an evaluation failure." + " " * 23 + "│")
+        write_line("  │  - This should correspond to a column name in your Weave traces table in the app." + " " * 10 + "│")
+        write_line("  │  - This could be a boolean, numeric or string column like 'is_correct' or 'score' etc." + " " * 5 + "│")
+        write_line("  │  - The error categorization will use this column to find the failures to focus on." + " " * 9 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  \033[2m↑/↓: Navigate    Space: Select    q: Cancel\033[0m" + " " * 47 + "│")
         write_line("  ╰" + "─" * 92 + "╯")
@@ -307,7 +324,7 @@ class FailureColumnSelector:
                 if i > 0 and i > start:
                     sys.stdout.write("\033[K\r\n")
                 # Group headers are never selectable, always use same prefix
-                sys.stdout.write(f"\033[K   \033[1;33m{item_data}\033[0m\r\n")
+                sys.stdout.write(f"\033[K   \033[1;95m{item_data}\033[0m\r\n")
             else:
                 # Column
                 if is_current:
@@ -352,11 +369,8 @@ class FailureColumnSelector:
         
         # Handle other keys
         if key == 'q':
-            # Exit the entire program when user cancels
-            sys.stdout.write("\033[?25h\033[?1049l")  # Show cursor and exit alternate screen
-            sys.stdout.flush()
-            print("Selection cancelled by user. Exiting...")
-            sys.exit(0)
+            # Raise exception when user cancels instead of exiting
+            raise UserCancelledException("Selection cancelled by user")
         elif key == '\r' or key == '\n' or key == ' ':  # Enter or Space
             if self.items[self.current_index][0] == 'column':
                 self.selected_column = self.items[self.current_index][1]
@@ -391,17 +405,20 @@ class FailureColumnSelector:
         # Header
         write_line()
         write_line()
-        write_line("  ╭" + "─" * 82 + "╮")
-        write_line("  │  \033[1m⚙️  2. Operator Selection\033[0m" + " " * 56 + "│")
-        write_line("  │" + " " * 82 + "│")
-        write_line("  │  Choose how to compare values for your selected column." + " " * 26 + "│")
-        write_line("  │" + " " * 82 + "│")
-        write_line("  │  \033[2m↑/↓: Navigate    Space: Select    q: Go back\033[0m" + " " * 36 + "│")
-        write_line("  ╰" + "─" * 82 + "╯")
+        write_line("  ╭" + "─" * 92 + "╮")
+        write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
+        write_line("  │" + " " * 92 + "│")
+        write_line("  │  \033[1m⚙️  2b. Operator Selection\033[0m" + " " * 65 + "│")
+        write_line("  │" + " " * 92 + "│")
+        write_line("  │  Choose how to compare values for your selected column" + " " * 37 + "│")
+        write_line("  │  - You will select the value to compare against next" + " " * 39 + "│")
+        write_line("  │" + " " * 92 + "│")
+        write_line("  │  \033[2m↑/↓: Navigate    Space: Select    q: Go back\033[0m" + " " * 46 + "│")
+        write_line("  ╰" + "─" * 92 + "╯")
         write_line()
         
         # Show column and sample values
-        write_line(f"Column: \033[96m{self.selected_column}\033[0m")
+        write_line(f"Selected column: \033[96m{self.selected_column}\033[0m")
         
         if self.selected_column in self.sample_values and self.sample_values[self.selected_column]:
             samples = self.sample_values[self.selected_column][:5]
@@ -445,8 +462,8 @@ class FailureColumnSelector:
             if len(self.sample_values[self.selected_column]) > 5:
                 sample_str += " (+" + str(len(self.sample_values[self.selected_column]) - 5) + " more)"
                 
-            write_line(f"Sample values: {sample_str}")
-            write_line(f"Detected type: {self.detected_type}")
+            write_line(f"Sample value(s): \033[96m{sample_str}\033[0m")
+            write_line(f"Detected type: \033[96m{self.detected_type}\033[0m")
         
         write_line()
         write_line("─" * 90)
@@ -458,7 +475,7 @@ class FailureColumnSelector:
         
         # Show recommended operators first
         if recommended:
-            write_line("\033[1;33mRecommended operators\033[0m")
+            write_line("\033[1;95mRecommended operators\033[0m")
             write_line()
         
         operator_list = []
@@ -502,7 +519,7 @@ class FailureColumnSelector:
             item = operator_list[i]
             if item[0] == "HEADER":
                 write_line()
-                write_line("\033[1;33mOther operators\033[0m")
+                write_line("\033[1;95mOther operators\033[0m")
                 write_line()
             else:
                 op_key, op_info, is_recommended = item
@@ -594,17 +611,20 @@ class FailureColumnSelector:
         write_line()
         write_line()
         write_line("  ╭" + "─" * 92 + "╮")
-        write_line("  │  \033[1m📝 3. Value Input\033[0m" + " " * 73 + "│")
+        write_line("  │  \033[1;96mStep 2: Select Failure Filter\033[0m" + " " * 61 + "│")
+        write_line("  │" + " " * 92 + "│")
+        write_line("  │  \033[1m📝 2c. Value Input\033[0m" + " " * 72 + "│")
         write_line("  │" + " " * 92 + "│")
         write_line("  │  Configure the filter value for your selected column and operator." + " " * 25 + "│")
         write_line("  │" + " " * 92 + "│")
+        write_line("  │  \033[2m↑/↓: Navigate (if applicable)    Enter: Submit    q: Go back\033[0m" + " " * 30 + "│")
         write_line("  ╰" + "─" * 92 + "╯")
         write_line()
         
         # Show column and operator
         op_info = self.OPERATORS[self.selected_operator]
         write_line(f"Column: \033[96m{self.selected_column}\033[0m")
-        write_line(f"Operator: \033[93m{self.selected_operator.replace('_', ' ').title()}\033[0m ({op_info['symbol']})")
+        write_line(f"Operator: \033[96m{self.selected_operator.replace('_', ' ').title()}\033[0m ({op_info['symbol']})")
         write_line()
         
         # Different input methods based on operator
@@ -613,7 +633,6 @@ class FailureColumnSelector:
             write_line("Enter comma-separated values:")
             write_line("Example: value1, value2, value3")
             write_line()
-            write_line("\033[2;36mType values and press Enter  │  q: Go back\033[0m")
             write_line("─" * 90)
             write_line()
             write_line(f"Values: {self.value_input}█")
@@ -622,15 +641,14 @@ class FailureColumnSelector:
             # Boolean selection with arrow navigation
             write_line("Select boolean value:")
             write_line()
-            write_line("\033[2;36m↑/↓: Navigate  │  Space/Enter: Select  │  q: Go back\033[0m")
             write_line("─" * 90)
             write_line()
             
             # Display boolean options with selection indicator
-            options = [(False, "\033[94mFalse\033[0m"), (True, "\033[93mTrue\033[0m")]
+            options = [(False, "False"), (True, "True")]
             for i, (value, display) in enumerate(options):
                 if i == self.value_selection_index:
-                    write_line(f" ▶  {display}")
+                    write_line(f" ▶  \033[96m{display}\033[0m")
                 else:
                     write_line(f"    {display}")
             
@@ -640,30 +658,16 @@ class FailureColumnSelector:
             if self.selected_column in self.sample_values and self.sample_values[self.selected_column]:
                 samples = self.sample_values[self.selected_column]
                 sample_str = self.format_sample_values(samples, max_samples=3)
-                write_line(f"Sample values: {sample_str}")
+                write_line(f"Sample values: \033[96m{sample_str}\033[0m")
             write_line(f"Enter {input_type}:")
             
             write_line()
-            write_line("\033[2;36mType value and press Enter  │  Backspace: Delete  │  q: Cancel\033[0m")
             write_line("─" * 90)
             write_line()
             write_line(f"Value: {self.value_input}█")
         
         write_line()
         write_line("─" * 90)
-        
-        # Show preview of the filter
-        if self.value_input or (self.detected_type == "boolean" and self.selected_operator in ["equals", "not_equals"]):
-            write_line()
-            write_line("\033[1;32mFilter preview:\033[0m")
-            if self.selected_operator == "equals":
-                preview = f"{self.selected_column} == {self.value_input or '...'}"
-            elif self.selected_operator in ["in_list", "not_in_list"]:
-                values = [v.strip() for v in self.value_input.split(',') if v.strip()]
-                preview = f"{self.selected_column} {op_info['symbol']} [{', '.join(repr(v) for v in values)}]"
-            else:
-                preview = f"{self.selected_column} {op_info['symbol']} {self.value_input or '...'}"
-            write_line(f"\033[2m{preview}\033[0m")
         
         # Clear rest of screen
         sys.stdout.write("\033[J")
@@ -756,18 +760,22 @@ def interactive_failure_column_selection(
     """
     # Show initial message
     console.print(Panel(
-        "[bold cyan]Enhanced Failure Column Selection[/bold cyan]\n\n"
+        "[bold cyan]Step 2: Select Failure Filter[/bold cyan]\n\n"
         "Select a column and condition to filter failed evaluations.\n\n"
-        "[dim]This process has 3 steps:\n"
-        "1. Select the column\n"
-        "2. Choose the operator (equals, greater than, contains, etc.)\n"
-        "3. Enter the value[/dim]",
+        "[dim]This step has 3 parts:\n"
+        "2a. Select the column\n"
+        "2b. Choose the operator (equals, greater than, contains, etc.)\n"
+        "2c. Enter the value[/dim]",
         border_style="cyan"
     ))
     
     # Run the selector
     selector = FailureColumnSelector(columns, sample_values)
-    column, value = selector.run()
+    try:
+        column, value = selector.run()
+    except UserCancelledException:
+        console.print("[yellow]Selection cancelled by user.[/yellow]")
+        return None, None
     
     # Show results
     if column and value is not None:
