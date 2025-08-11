@@ -11,7 +11,7 @@
 
 ***Look at your most relevant failures first***
 
-
+![Logo](logo.png)
 
 FAILS is a tool for reviewing evaluation failures and categorizing them. The pipeline fetches evaluation data from [Weave](https://weave-docs.wandb.ai/), categorizes failures, clusters them into failure categories and outputs a report with the failure clusters. 
 
