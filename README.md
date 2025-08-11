@@ -57,9 +57,9 @@ You can adjust the pipeline settings either via the env vars in `.env` or via cl
 uv run fails/pipeline.py --debug
 
 # Use different models
-uv run fails/pipeline.py --model "openai/gpt-4o"
-uv run fails/pipeline.py --model "anthropic/claude-3-5-sonnet-latest"
-uv run fails/pipeline.py --model "gemini/gemini-2.0-flash-exp"
+uv run fails/pipeline.py --model "openai/gpt-5"
+uv run fails/pipeline.py --model "anthropic/claude-opus-4-1-20250805"
+uv run fails/pipeline.py --model "gemini/gemini-2.5-pro"
 
 # Limit samples and concurrency
 uv run fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
