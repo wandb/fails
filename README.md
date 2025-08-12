@@ -89,3 +89,6 @@ Run speaker classification eval:
 cd evals/speaker_classification
 uv run python speaker_classification.py
 ```
+
+## Influences
+Inspired by [Hamel Husain](https://x.com/HamelHusain) and [Shreya Shankar](https://x.com/sh_reya) and their work sharing best practices for evals for LLMs.
