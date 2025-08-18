@@ -350,27 +350,40 @@ class WeaveQueryClient:
                             })
                         elif op in ["$gt", "$gte", "$lt", "$lte"]:
                             # Handle comparison operators
-                            if isinstance(operand, float) and field not in ["started_at", "ended_at"]:
-                                # Float fields need conversion
+                            # Note: The Weave API doesn't support $lt and $lte directly
+                            # We need to convert them to their logical equivalents
+                            
+                            # For numeric fields, we need to convert to double
+                            if field not in ["started_at", "ended_at"]:
+                                field_ref = {"$convert": {"input": {"$getField": field}, "to": "double"}}
+                            else:
+                                field_ref = {"$getField": field}
+                            
+                            if op == "$lt":
+                                # $lt is equivalent to $not($gte)
                                 expr_conditions.append({
-                                    op: [
-                                        {"$convert": {"input": {"$getField": field}, "to": "double"}},
-                                        {"$literal": operand}
-                                    ]
+                                    "$not": [{
+                                        "$gte": [
+                                            field_ref,
+                                            {"$literal": operand}
+                                        ]
+                                    }]
                                 })
-                            elif isinstance(operand, int) and not isinstance(operand, bool) and field not in ["started_at", "ended_at"]:
-                                # Integer fields need conversion
+                            elif op == "$lte":
+                                # $lte is equivalent to $not($gt)
                                 expr_conditions.append({
-                                    op: [
-                                        {"$convert": {"input": {"$getField": field}, "to": "int"}},
-                                        {"$literal": operand}
-                                    ]
+                                    "$not": [{
+                                        "$gt": [
+                                            field_ref,
+                                            {"$literal": operand}
+                                        ]
+                                    }]
                                 })
                             else:
-                                # Timestamps, strings, or other comparisons
+                                # $gt and $gte are supported directly
                                 expr_conditions.append({
                                     op: [
-                                        {"$getField": field},
+                                        field_ref,
                                         {"$literal": operand}
                                     ]
                                 })
@@ -506,11 +519,8 @@ class WeaveQueryClient:
                         ]
                     })
             
-            # If multiple conditions, combine with $and
-            if len(expr_conditions) == 1:
-                query["query"] = {"$expr": expr_conditions[0]}
-            else:
-                query["query"] = {"$expr": {"$and": expr_conditions}}
+            # Always wrap conditions in $and for consistent MongoDB structure
+            query["query"] = {"$expr": {"$and": expr_conditions}}
             
             # Default sorting by started_at unless explicitly specified
             if "sort_by" not in query:
