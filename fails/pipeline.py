@@ -49,6 +49,7 @@ from fails.prompts import (
 from fails.utils import (
     display_evaluation_summary,
     generate_evaluation_report,
+    generate_evaluation_report_markdown,
     prepare_trace_data_for_pipeline,
     validate_failure_column,
 )
@@ -1503,7 +1504,17 @@ async def run_extract_and_classify_pipeline(
     console.print("\n[bold cyan]Step 4: Report Generation[/bold cyan]")
     console.print("[bright_magenta]  Generating evaluation report...[/bright_magenta]")
 
-    report = generate_evaluation_report(
+    # Generate Rich-formatted report for console display
+    report_rich = generate_evaluation_report(
+        final_classification_results=final_classification_results,
+        all_categories=all_categories,
+        eval_name=eval_data["evaluation"].get("display_name", eval_id),
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+    )
+    
+    # Generate Markdown report for file saving
+    report_markdown = generate_evaluation_report_markdown(
         final_classification_results=final_classification_results,
         all_categories=all_categories,
         eval_name=eval_data["evaluation"].get("display_name", eval_id),
@@ -1511,19 +1522,19 @@ async def run_extract_and_classify_pipeline(
         wandb_project=wandb_project,
     )
 
-    # Display the report
+    # Display the Rich-formatted report in console
     console.print("")  # Add spacing
     console.print(Panel(
-        report,
+        report_rich,
         title="Evaluation Failures Report",
         border_style="white",
         padding=(1, 2),
     ))
 
-    # Save report to local file
+    # Save markdown report to local file
     eval_name = eval_data["evaluation"].get("display_name", eval_id)
     local_filepath = save_report_to_file(
-        report_text=report,
+        report_text=report_markdown,
         eval_name=eval_name,
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
@@ -1566,7 +1577,7 @@ async def run_extract_and_classify_pipeline(
         padding=(1, 2),
     ))
 
-    pipeline_result.report = report
+    pipeline_result.report = report_markdown  # Store markdown version for external use
 
     if debug:
         console.print(

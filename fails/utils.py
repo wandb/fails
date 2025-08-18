@@ -295,6 +295,136 @@ def filter_trace_data_by_columns(
 
 
 @weave.op
+def generate_evaluation_report_markdown(
+    final_classification_results: List[FinalClassificationResult],
+    all_categories: List[Category],
+    eval_name: str,
+    wandb_entity: str = None,
+    wandb_project: str = None,
+) -> str:
+    """
+    Generate an evaluation report from classification results in pure Markdown format.
+
+    Args:
+        final_classification_results: List of classification results
+        all_categories: List of all available categories
+        eval_name: Name of the evaluation
+        wandb_entity: W&B entity for generating trace URLs
+        wandb_project: W&B project for generating trace URLs
+
+    Returns:
+        Formatted report string in pure Markdown
+    """
+    # Create a summary of classifications
+    classification_summary = {}
+    total_failures = len(final_classification_results)
+
+    for result in final_classification_results:
+        category = result.failure_category
+        if category not in classification_summary:
+            classification_summary[category] = {"traces": [], "category_info": None}
+        classification_summary[category]["traces"].append(
+            {
+                "trace_id": result.trace_id,
+                "notes": result.categorization_reason,
+            }
+        )
+
+    # Get category info from all_categories
+    for category in all_categories:
+        if category.failure_category_name in classification_summary:
+            classification_summary[category.failure_category_name]["category_info"] = category
+
+    # Sort categories by count (descending)
+    sorted_categories = sorted(
+        classification_summary.items(), key=lambda x: len(x[1]["traces"]), reverse=True
+    )
+
+    # Helper function to create trace URL
+    def get_trace_url(trace_id):
+        if wandb_entity and wandb_project:
+            return f"https://wandb.ai/{wandb_entity}/{wandb_project}/weave/calls/{trace_id}"
+        return trace_id
+
+    # Generate report in Markdown
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    report = f"# '{eval_name}' Evaluation Failures\n"
+    report += f"*Generated: {current_time}*\n\n"
+
+    # Add summary table to the report
+    report += "## Summary\n\n"
+    report += "| Category | Count | Percentage |\n"
+    report += "|----------|-------|------------|\n"
+
+    # Add table rows
+    for category_name, category_data in sorted_categories:
+        traces = category_data["traces"]
+        count = len(traces)
+        percentage = (count / total_failures) * 100
+        display_name = category_name.replace("_", " ").title()
+        
+        report += f"| {display_name} | {count} | {percentage:.1f}% |\n"
+
+    report += "\n"
+    report += "## Failure Categories\n\n"
+
+    for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
+        traces = category_data["traces"]
+        category_info = category_data["category_info"]
+        count = len(traces)
+        percentage = (count / total_failures) * 100
+
+        # Format category name for display
+        display_name = category_name.replace("_", " ").title()
+
+        report += f"### {idx}. {display_name}\n\n"
+        report += f"**Count:** {count} ({percentage:.1f}% of failures)\n\n"
+
+        if category_info:
+            report += f"{category_info.failure_category_definition}\n\n"
+
+        # Add examples section only if there are notes to show
+        has_examples = any(trace["notes"] for trace in traces[:5])
+        if has_examples:
+            report += "**Examples:**\n\n"
+
+            # Show up to 5 example trace IDs and notes with clickable URLs
+            for i, trace in enumerate(traces[:5]):
+                if trace["notes"]:
+                    trace_url = get_trace_url(trace['trace_id'])
+                    report += f"- **Trace:** [{trace['trace_id']}]({trace_url})\n"
+                    report += f"  - {trace['notes']}\n"
+                    if i < min(4, len(traces) - 1):
+                        report += "\n"
+
+        if idx < len(sorted_categories):
+            report += "\n"
+
+    # Add all trace ID lists at the end
+    report += "\n## Complete Trace ID Lists by Category\n\n"
+    report += "*The following sections contain all trace IDs for each failure category, which can be used for further analysis or debugging.*\n\n"
+    
+    for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
+        traces = category_data["traces"]
+        display_name = category_name.replace("_", " ").title()
+        
+        report += f"### {idx}. {display_name} ({len(traces)} traces)\n\n"
+        report += "```json\n[\n"
+        trace_ids_with_links = []
+        for trace in traces:
+            trace_url = get_trace_url(trace['trace_id'])
+            # Add the ID as a comment with URL
+            trace_ids_with_links.append(f'    "{trace["trace_id"]}"  // {trace_url}')
+        report += ",\n".join(trace_ids_with_links)
+        report += "\n]\n```\n\n"
+
+    report += "---\n*END REPORT*\n"
+
+    return report
+
+
+@weave.op
 def generate_evaluation_report(
     final_classification_results: List[FinalClassificationResult],
     all_categories: List[Category],
@@ -303,7 +433,7 @@ def generate_evaluation_report(
     wandb_project: str = None,
 ) -> str:
     """
-    Generate an evaluation report from classification results.
+    Generate an evaluation report from classification results with Rich formatting for console display.
 
     Args:
         final_classification_results: List of classification results
