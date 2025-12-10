@@ -263,6 +263,9 @@ class Args:
     n_samples: int | None = None
     max_concurrent_llm_calls: int = 20  # Control concurrent LLM API calls
     eval_id: str | None = None  # Optional evaluation ID to skip interactive selection
+    deep_trace_analysis: bool = False  # Enable deep trace analysis for agentic workflows
+    nesting_depth: int = 2  # How deep to traverse nested traces (1=children, 2=grandchildren, etc.)
+    max_trace_tokens: int = 2000  # Token threshold before LLM compaction kicks in
 
 
 @weave.op
@@ -1848,5 +1851,8 @@ if __name__ == "__main__":
             wandb_entity=final_wandb_entity,
             wandb_project=final_wandb_project,
             n_samples=args.n_samples,
+            deep_trace_analysis=args.deep_trace_analysis,
+            nesting_depth=args.nesting_depth,
+            max_trace_tokens=args.max_trace_tokens,
         )
     )
