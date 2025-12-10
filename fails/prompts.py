@@ -95,7 +95,7 @@ their AI system.
 <evaluation_evaluation_or_scorer_data>
 {evaluation_evaluation_or_scorer_data}
 </evaluation_evaluation_or_scorer_data>
-
+{execution_trace_section}
 ## Analyse and Draft Notes and Candidate Task Failure Categories
 
 With the above user context and evaluation failure data, please output a draft set of notes and candidate \
@@ -113,6 +113,31 @@ Ensure that the candidate task failure categories are:
 - lowercase
 - separated by underscores
 - no more than 5 words maximum
+"""
+
+
+# Execution trace section template - only included when deep_trace_analysis is enabled
+EXECUTION_TRACE_SECTION = """
+
+### Agent Execution Trace (showing internal decision-making process)
+
+The following trace shows the internal execution flow of the agent, including tool calls, their inputs/outputs, and the sequence of operations.
+
+Look for these trace-observable failure patterns:
+
+**Tool Use Failures:**
+- Wrong tool choice — Used tool X when tool Y was better suited
+- Bad tool input — Right tool, but malformed or suboptimal parameters
+- Ignored/misinterpreted tool output — Didn't incorporate or misread tool results
+- Redundant tool calls — Called the same thing multiple times unnecessarily
+
+**Planning Failures:**
+- Stuck in loop — Repeated the same action/pattern without progress
+- Poor ordering — Did things in an inefficient or illogical sequence
+
+<agent_execution_trace>
+{execution_trace}
+</agent_execution_trace>
 """
 
 
@@ -264,7 +289,7 @@ classify this specific failure into the most appropriate category.
 <evaluation_evaluation_or_scorer_data>
 {evaluation_evaluation_or_scorer_data}
 </evaluation_evaluation_or_scorer_data>
-
+{execution_trace_section}
 ## Available Failure Categories
 
 <available_failure_categories>
