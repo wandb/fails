@@ -34,6 +34,8 @@ from fails.cli.header import get_fails_header_for_rich
 from fails.prompts import (
     CLUSTERING_PROMPT,
     CLUSTERING_SYSTEM_PROMPT,
+    DEFAULT_COMPACTION_MODEL,
+    EXECUTION_TRACE_SECTION,
     FINAL_CLASSIFICATION_PROMPT,
     FINAL_CLASSIFICATION_SYSTEM_PROMPT,
     FIRST_PASS_CATEGORIZATION_PROMPT,
@@ -944,6 +946,7 @@ def construct_first_pass_categorization_prompt(
     row_output: dict | str,
     evaluation_evaluation_or_scorer_data: dict | str,
     user_context: str,
+    execution_trace: str | None = None,
 ) -> str:
     # Convert to JSON strings if needed
     if isinstance(row_input, dict):
@@ -955,11 +958,20 @@ def construct_first_pass_categorization_prompt(
             evaluation_evaluation_or_scorer_data, indent=2
         )
 
+    # Build execution trace section if provided
+    if execution_trace:
+        execution_trace_section = EXECUTION_TRACE_SECTION.format(
+            execution_trace=execution_trace
+        )
+    else:
+        execution_trace_section = ""
+
     first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
         user_context=user_context,
         row_input=row_input,
         row_output=row_output,
         evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        execution_trace_section=execution_trace_section,
     )
     return first_pass_categorization_prompt_str
 
@@ -974,6 +986,7 @@ async def draft_categorization(
     model: str,
     llm_semaphore: Semaphore,
     debug: bool = False,
+    execution_trace: str | None = None,
 ) -> FirstPassCategorizationResult:
     async with llm_semaphore:
         draft_categorization_llm = Agent(
@@ -988,6 +1001,7 @@ async def draft_categorization(
             row_input=row_input,
             row_output=row_output,
             evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+            execution_trace=execution_trace,
         )
 
         draft_categorizations = await Runner.run(
@@ -1011,6 +1025,7 @@ async def run_draft_categorization(
     model: str,
     max_concurrent_llm_calls: int,
     debug: bool = False,
+    deep_trace_analysis: bool = False,
 ) -> list[FirstPassCategorizationResult]:
     # Create shared semaphore for all draft categorization tasks
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
@@ -1026,6 +1041,7 @@ async def run_draft_categorization(
             model=model,
             debug=debug,
             llm_semaphore=llm_semaphore,
+            execution_trace=trace_entry.get("execution_trace") if deep_trace_analysis else None,
         )
         for trace_entry in trace_data
     ]
@@ -1041,6 +1057,7 @@ def construct_final_classification_prompt(
     evaluation_evaluation_or_scorer_data: str | dict,
     user_context: str,
     available_categories_str: str,
+    execution_trace: str | None = None,
 ) -> str:
     # Convert dictionaries to JSON strings if needed
     if isinstance(row_input, dict):
@@ -1052,12 +1069,21 @@ def construct_final_classification_prompt(
             evaluation_evaluation_or_scorer_data, indent=2
         )
 
+    # Build execution trace section if provided
+    if execution_trace:
+        execution_trace_section = EXECUTION_TRACE_SECTION.format(
+            execution_trace=execution_trace
+        )
+    else:
+        execution_trace_section = ""
+
     final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
         user_context=user_context,
         row_input=row_input,
         row_output=row_output,
         evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
         available_failure_categories=available_categories_str,
+        execution_trace_section=execution_trace_section,
     )
     return final_classification_prompt_str
 
@@ -1072,6 +1098,7 @@ async def final_classification(
     available_categories_str: str,
     model: str,
     llm_semaphore: Semaphore,
+    execution_trace: str | None = None,
 ) -> FinalClassificationResult:
     async with llm_semaphore:
         final_classification_llm = Agent(
@@ -1087,6 +1114,7 @@ async def final_classification(
             evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
             user_context=user_context,
             available_categories_str=available_categories_str,
+            execution_trace=execution_trace,
         )
 
         classification_result = await Runner.run(
@@ -1112,6 +1140,7 @@ async def run_final_classification(
     model: str,
     max_concurrent_llm_calls: int,
     debug: bool = False,
+    deep_trace_analysis: bool = False,
 ) -> list[FinalClassificationResult]:
     # Create shared semaphore for all final classification tasks
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
@@ -1126,6 +1155,7 @@ async def run_final_classification(
             available_categories_str=available_categories_str,
             model=model,
             llm_semaphore=llm_semaphore,
+            execution_trace=trace_entry.get("execution_trace") if deep_trace_analysis else None,
         )
         for trace_entry in trace_data
     ]
@@ -1188,10 +1218,14 @@ async def run_pipeline(
     max_concurrent_llm_calls: int,
     debug: bool = False,
     console: Console = Console(),
+    deep_trace_analysis: bool = False,
 ) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
     console.print("\n[bold cyan]Step 1: Draft Categorization[/bold cyan]")
     console.print(f"[bright_magenta]  Starting draft categorization for {len(trace_data)} traces...[/bright_magenta]")
+    
+    if deep_trace_analysis:
+        console.print("[dim]  Deep trace analysis enabled - including execution traces in prompts[/dim]")
 
     if debug:
         first_pass_categorization_prompt_str = (
@@ -1200,6 +1234,7 @@ async def run_pipeline(
                 row_output=trace_data[0]["output"],
                 evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
                 user_context=user_context,
+                execution_trace=trace_data[0].get("execution_trace") if deep_trace_analysis else None,
             )
         )
         console.print(
@@ -1229,6 +1264,7 @@ async def run_pipeline(
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
+        deep_trace_analysis=deep_trace_analysis,
     )
 
     num_draft_categorizations = len(draft_categorization_results)
@@ -1385,6 +1421,7 @@ async def run_pipeline(
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
+        deep_trace_analysis=deep_trace_analysis,
     )
     
     classification_spinner.stop("Classification complete", success=True)
@@ -1408,6 +1445,10 @@ async def run_extract_and_classify_pipeline(
     wandb_project: str,
     force_eval_select: bool = False,
     n_samples: int | None = None,
+    deep_trace_analysis: bool = False,
+    nesting_depth: int = 2,
+    max_trace_tokens: int = 2000,
+    compaction_model: str = DEFAULT_COMPACTION_MODEL,
 ) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
@@ -1428,6 +1469,19 @@ async def run_extract_and_classify_pipeline(
                 border_style="white",
                 padding=(1, 2),
                 width=105,
+            )
+        )
+    
+    if deep_trace_analysis:
+        console.print(
+            Panel(
+                f"[bold]Deep Trace Analysis:[/bold] Enabled\n"
+                f"[bold]Nesting Depth:[/bold] {nesting_depth}\n"
+                f"[bold]Max Trace Tokens:[/bold] {max_trace_tokens}\n"
+                f"[bold]Compaction Model:[/bold] {compaction_model}",
+                title="Deep Trace Analysis Settings",
+                border_style="cyan",
+                padding=(1, 2),
             )
         )
     
@@ -1482,7 +1536,16 @@ async def run_extract_and_classify_pipeline(
 
     # Prepare trace data for pipeline
     trace_data = prepare_trace_data_for_pipeline(
-        eval_data, debug, console, n_samples=n_samples
+        eval_data, 
+        debug, 
+        console, 
+        n_samples=n_samples,
+        deep_trace_analysis=deep_trace_analysis,
+        nesting_depth=nesting_depth,
+        max_trace_tokens=max_trace_tokens,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
+        compaction_model=compaction_model,
     )
 
     console.print("")  # Add spacing before pipeline execution
@@ -1495,6 +1558,7 @@ async def run_extract_and_classify_pipeline(
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
         console=console,
+        deep_trace_analysis=deep_trace_analysis,
     )
     final_classification_results = pipeline_result.classifications
     all_categories = pipeline_result.failure_categories
