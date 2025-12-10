@@ -65,8 +65,8 @@ class UserContextCollector:
         header_text = FormattedText([
             ('class:step_header', '\nStep 2: Add Context\n'),
             ('', '\n'),
-            ('', '- Please provide context about your AI system and the evaluations you are running.\n'),
-            ('', '- This helps create more specific failure categories for your evaluation\n'),
+            ('', '- Please provide context about your AI system and the traces you are analyzing.\n'),
+            ('', '- This helps create more specific pattern categories for your traces\n'),
             ('', '- More details can lead to better categorization.\n'),
             ('', '\n'),
             ('class:instructions', 'You will only have to do this once per project and you can also edit it later.\n'),
@@ -87,18 +87,18 @@ class UserContextCollector:
         
         eval_frame = Frame(
             self.eval_context_area,
-            title="Evaluation Context - What is this evaluation specifically testing?",
+            title="Analysis Context - What are you trying to analyze in these traces?",
             width=105,
             height=6,
         )
-        
+
         # Add example text below each frame
         system_example = FormattedText([
             ('class:instructions', '  Example: "Analyzing customer support transcripts to extract action items and sentiment"\n'),
         ])
-        
+
         eval_example = FormattedText([
-            ('class:instructions', '  Example: "Testing whether the model correctly identifies speaker roles (agent vs customer)"\n'),
+            ('class:instructions', '  Example: "Identifying common failure patterns when the model incorrectly classifies speaker roles"\n'),
         ])
         
         # Create error message window
@@ -162,7 +162,7 @@ class UserContextCollector:
                 return
             
             if not eval_text:
-                self.error_message = "❌ Please provide evaluation context."
+                self.error_message = "❌ Please provide analysis context."
                 return
             
             # Both contexts provided, exit with result

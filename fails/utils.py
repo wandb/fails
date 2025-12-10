@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import weave
 from rich.console import Console
@@ -23,8 +23,12 @@ def display_evaluation_summary(
         failure_config: Optional failure filter configuration
         console: Rich console for output
     """
-    # Build evaluation info
-    eval_info = f"""[bold cyan]Evaluation ID:[/bold cyan] {eval_data["evaluation"]["id"]}"""
+    # Build evaluation info - handle both evaluation and trace-only queries
+    if "evaluation" in eval_data:
+        eval_info = f"""[bold cyan]Evaluation ID:[/bold cyan] {eval_data["evaluation"]["id"]}"""
+    else:
+        # For trace-only queries (from trace URLs with filters)
+        eval_info = f"""[bold cyan]Traces:[/bold cyan] {len(eval_data.get('children', []))} traces retrieved"""
 
     # If we have a failure filter, add info about filtered results
     if failure_config:
@@ -51,10 +55,12 @@ def display_evaluation_summary(
         eval_info += f"\n[bold cyan]Failure filter:[/bold cyan] {filter_display}"
         eval_info += f"\n[bold cyan]Filtered traces:[/bold cyan] {len(eval_data.get('children', []))}"
 
-    console.print(Panel(eval_info, title="Evaluation Summary", border_style="white"))
+    # Update title based on whether we have an evaluation or just traces
+    title = "Evaluation Summary" if "evaluation" in eval_data else "Trace Query Summary"
+    console.print(Panel(eval_info, title=title, border_style="white"))
 
-    # Show evaluation summary if available
-    if "summary" in eval_data["evaluation"]:
+    # Show evaluation summary if available (only for evaluation queries)
+    if "evaluation" in eval_data and "summary" in eval_data["evaluation"]:
         console.print(
             f"[yellow]Evaluation Summary: {eval_data['evaluation']['summary']}[/yellow]"
         )
@@ -99,26 +105,131 @@ def validate_failure_column(
         raise ValueError(f"Error accessing failure column '{failure_config['failure_column']}': {e}")
 
 
+def extract_human_annotations(trace: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract human annotations from a trace.
+
+    Checks common annotation locations:
+    - attributes.weave.user_feedback
+    - attributes.annotation
+    - annotation
+    - feedback
+    - summary.weave.status (for annotation status)
+
+    Args:
+        trace: The trace data
+
+    Returns:
+        Dictionary of annotations found, empty if none
+    """
+    annotations = {}
+
+    # Check attributes.weave for user_feedback and annotations
+    if "attributes" in trace and "weave" in trace["attributes"]:
+        weave_attrs = trace["attributes"]["weave"]
+
+        if "user_feedback" in weave_attrs:
+            annotations["user_feedback"] = weave_attrs["user_feedback"]
+
+        # Check for annotation-related fields in attributes.weave
+        for key in weave_attrs.keys():
+            if "annotation" in key.lower() or "feedback" in key.lower():
+                annotations[f"weave.{key}"] = weave_attrs[key]
+
+    # Check attributes for annotation field
+    if trace.get("attributes", {}).get("annotation"):
+        annotations["annotation"] = trace["attributes"]["annotation"]
+
+    # Check top-level annotation field
+    if trace.get("annotation"):
+        annotations["annotation"] = trace["annotation"]
+
+    # Check top-level feedback field
+    if trace.get("feedback"):
+        annotations["feedback"] = trace["feedback"]
+
+    # Check summary for weave status (annotated/reviewed status)
+    if trace.get("summary", {}).get("weave", {}).get("status"):
+        annotations["weave_status"] = trace["summary"]["weave"]["status"]
+
+    return annotations
+
+
+def extract_metadata(trace: Dict[str, Any], selected_columns: List[str]) -> Dict[str, Any]:
+    """
+    Extract metadata from a trace including scores, timestamps, and other fields.
+
+    Args:
+        trace: The trace data
+        selected_columns: List of column paths to extract
+
+    Returns:
+        Dictionary of metadata
+    """
+    metadata = {}
+
+    # Extract scores if they exist (evaluation-style traces)
+    if trace.get("output", {}).get("scores"):
+        metadata["scores"] = trace["output"]["scores"]
+
+    # Extract timestamps
+    if trace.get("started_at"):
+        metadata["started_at"] = trace["started_at"]
+    if trace.get("ended_at"):
+        metadata["ended_at"] = trace["ended_at"]
+
+    # Extract summary if available
+    if trace.get("summary"):
+        metadata["summary"] = trace["summary"]
+
+    # Extract exception if any
+    if trace.get("exception"):
+        metadata["exception"] = trace["exception"]
+
+    # Extract any other selected columns that aren't inputs/output
+    for col in selected_columns:
+        if col not in ["inputs", "output", "id"] and "." in col:
+            # Handle nested paths
+            parts = col.split(".")
+            value = trace
+            for part in parts:
+                if isinstance(value, dict):
+                    value = value.get(part)
+                else:
+                    value = None
+                    break
+            if value is not None:
+                metadata[col] = value
+
+    return metadata
+
+
 @weave.op
 def prepare_trace_data_for_pipeline(
     eval_data: Dict[str, Any],
     debug: bool,
     console: Console,
-    n_samples: int | None = None
-) -> List[Dict[str, Any]]:
+    n_samples: int | None = None,
+    selected_columns: List[str] | None = None
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Prepare trace data from evaluation data for pipeline processing.
-    
+    Prepare trace data for pipeline processing.
+
     Args:
-        eval_data: The evaluation data dictionary
+        eval_data: The evaluation data dictionary (with 'children' key)
         debug: Whether to display debug information
         console: Rich console for output
-        
+        n_samples: Optional limit on number of samples
+        selected_columns: List of column paths to extract as metadata
+
     Returns:
-        List of trace entries formatted for the pipeline
+        Tuple of (trace_data, annotation_summary) where:
+        - trace_data: List of trace entries formatted for the pipeline
+        - annotation_summary: Dict with keys 'has_annotations' and 'examples'
     """
     trace_data = []
-    
+    annotation_examples = []
+
     # Display child trace information
     if eval_data.get("children"):
         if n_samples:
@@ -132,26 +243,67 @@ def prepare_trace_data_for_pipeline(
             console.print(
                 f"[dim]{len(eval_data['children'])} children found, sampling first {n_samples}:[/dim]\n"
             )
-        
+
         for i, trace in enumerate(eval_data["children"]):
+            # Extract human annotations
+            annotations = extract_human_annotations(trace)
+
+            # Extract metadata (scores, timestamps, etc.)
+            metadata = extract_metadata(trace, selected_columns or [])
+
             # Format trace entry for pipeline
             trace_entry = {
                 "id": trace.get("id"),
                 "inputs": trace.get("inputs", {}),
                 "output": trace.get("output", {}),
-                "scores": trace.get("output", {}).get("scores", {}) if trace.get("output") else {},
+                "metadata": metadata,
+                "annotations": annotations,
             }
-            
+
             trace_data.append(trace_entry)
-            
+
+            # Collect annotation examples for the prompt
+            if annotations:
+                annotation_examples.append({
+                    "trace_id": trace.get("id"),
+                    "annotations": annotations
+                })
+
             # Display debug information for first trace
             if debug and i == 0:
                 display_trace_debug_info(trace, trace_entry, i, console)
+
+                # Also show annotation check details for first trace
+                if annotations:
+                    console.print(f"\n[green]✓ First trace has annotations:[/green]")
+                    for key, value in annotations.items():
+                        console.print(f"  [dim]{key}:[/dim] {str(value)[:100]}...")
+                else:
+                    console.print(f"\n[yellow]First trace has no annotations[/yellow]")
+                    console.print(f"[dim]  Available trace keys: {list(trace.keys())[:10]}[/dim]")
+                    if "attributes" in trace:
+                        console.print(f"[dim]  attributes keys: {list(trace.get('attributes', {}).keys())}[/dim]")
     else:
         console.print("[red]No children found in eval_data[/red]")
         raise ValueError("No children found in eval_data")
-    
-    return trace_data
+
+    annotation_summary = {
+        "has_annotations": len(annotation_examples) > 0,
+        "examples": annotation_examples[:5]  # Limit to first 5 examples for prompt
+    }
+
+    if debug:
+        if annotation_summary["has_annotations"]:
+            console.print(f"\n[bright_cyan]✓ Found {len(annotation_examples)} traces with human annotations[/bright_cyan]")
+            console.print(f"[dim]  Annotation examples will be included in prompts[/dim]")
+            # Show a sample of what annotations look like
+            if annotation_examples:
+                console.print(f"[dim]  Sample annotation keys: {list(annotation_examples[0]['annotations'].keys())}[/dim]")
+        else:
+            console.print(f"\n[yellow]No human annotations found in traces[/yellow]")
+            console.print(f"[dim]  Checked for: attributes.weave.user_feedback, attributes.annotation, annotation, feedback[/dim]")
+
+    return trace_data, annotation_summary
 
 
 def display_trace_debug_info(
@@ -303,7 +455,7 @@ def generate_evaluation_report_markdown(
     wandb_project: str = None,
 ) -> str:
     """
-    Generate an evaluation report from classification results in pure Markdown format.
+    Generate a trace pattern report from classification results in pure Markdown format.
 
     Args:
         final_classification_results: List of classification results
@@ -317,10 +469,10 @@ def generate_evaluation_report_markdown(
     """
     # Create a summary of classifications
     classification_summary = {}
-    total_failures = len(final_classification_results)
+    total_traces = len(final_classification_results)
 
     for result in final_classification_results:
-        category = result.failure_category
+        category = result.pattern_category
         if category not in classification_summary:
             classification_summary[category] = {"traces": [], "category_info": None}
         classification_summary[category]["traces"].append(
@@ -332,8 +484,8 @@ def generate_evaluation_report_markdown(
 
     # Get category info from all_categories
     for category in all_categories:
-        if category.failure_category_name in classification_summary:
-            classification_summary[category.failure_category_name]["category_info"] = category
+        if category.pattern_category_name in classification_summary:
+            classification_summary[category.pattern_category_name]["category_info"] = category
 
     # Sort categories by count (descending)
     sorted_categories = sorted(
@@ -349,7 +501,7 @@ def generate_evaluation_report_markdown(
     # Generate report in Markdown
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    report = f"# '{eval_name}' Evaluation Failures\n"
+    report = f"# '{eval_name}' Trace Pattern Analysis\n"
     report += f"*Generated: {current_time}*\n\n"
 
     # Add summary table to the report
@@ -361,28 +513,28 @@ def generate_evaluation_report_markdown(
     for category_name, category_data in sorted_categories:
         traces = category_data["traces"]
         count = len(traces)
-        percentage = (count / total_failures) * 100
+        percentage = (count / total_traces) * 100
         display_name = category_name.replace("_", " ").title()
-        
+
         report += f"| {display_name} | {count} | {percentage:.1f}% |\n"
 
     report += "\n"
-    report += "## Failure Categories\n\n"
+    report += "## Pattern Categories\n\n"
 
     for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
         traces = category_data["traces"]
         category_info = category_data["category_info"]
         count = len(traces)
-        percentage = (count / total_failures) * 100
+        percentage = (count / total_traces) * 100
 
         # Format category name for display
         display_name = category_name.replace("_", " ").title()
 
         report += f"### {idx}. {display_name}\n\n"
-        report += f"**Count:** {count} ({percentage:.1f}% of failures)\n\n"
+        report += f"**Count:** {count} ({percentage:.1f}% of traces)\n\n"
 
         if category_info:
-            report += f"{category_info.failure_category_definition}\n\n"
+            report += f"{category_info.pattern_category_definition}\n\n"
 
         # Add examples section only if there are notes to show
         has_examples = any(trace["notes"] for trace in traces[:5])
@@ -433,7 +585,7 @@ def generate_evaluation_report(
     wandb_project: str = None,
 ) -> str:
     """
-    Generate an evaluation report from classification results with Rich formatting for console display.
+    Generate a trace pattern report from classification results with Rich formatting for console display.
 
     Args:
         final_classification_results: List of classification results
@@ -447,10 +599,10 @@ def generate_evaluation_report(
     """
     # Create a summary of classifications
     classification_summary = {}
-    total_failures = len(final_classification_results)
+    total_traces = len(final_classification_results)
 
     for result in final_classification_results:
-        category = result.failure_category
+        category = result.pattern_category
         if category not in classification_summary:
             classification_summary[category] = {"traces": [], "category_info": None}
         classification_summary[category]["traces"].append(
@@ -462,8 +614,8 @@ def generate_evaluation_report(
 
     # Get category info from all_categories
     for category in all_categories:
-        if category.failure_category_name in classification_summary:
-            classification_summary[category.failure_category_name]["category_info"] = category
+        if category.pattern_category_name in classification_summary:
+            classification_summary[category.pattern_category_name]["category_info"] = category
 
     # Sort categories by count (descending)
     sorted_categories = sorted(
@@ -479,7 +631,7 @@ def generate_evaluation_report(
     # Generate report
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    report = f"[bold bright_cyan]## '{eval_name}' Evaluation Failures[/bold bright_cyan] [dim]- {current_time}[/dim]\n\n"
+    report = f"[bold bright_cyan]## '{eval_name}' Trace Pattern Analysis[/bold bright_cyan] [dim]- {current_time}[/dim]\n\n"
 
     # Add summary table to the report
     # Calculate max widths for alignment
@@ -497,7 +649,7 @@ def generate_evaluation_report(
     for category_name, category_data in sorted_categories:
         traces = category_data["traces"]
         count = len(traces)
-        percentage = (count / total_failures) * 100
+        percentage = (count / total_traces) * 100
         display_name = category_name.replace("_", " ").title()
 
         # Color the count based on percentage (higher percentages in brighter colors)
@@ -507,26 +659,26 @@ def generate_evaluation_report(
             count_color = "yellow"
         else:
             count_color = "white"
-        
+
         report += f"{display_name.ljust(max_category_width)} | [{count_color}]{str(count).center(10)}[/{count_color}] | {f'{percentage:.1f}%'.center(12)}\n"
 
     report += "\n"
-    report += "[bold bright_cyan]### Failure Categories:[/bold bright_cyan]\n\n"
+    report += "[bold bright_cyan]### Pattern Categories:[/bold bright_cyan]\n\n"
 
     for idx, (category_name, category_data) in enumerate(sorted_categories, 1):
         traces = category_data["traces"]
         category_info = category_data["category_info"]
         count = len(traces)
-        percentage = (count / total_failures) * 100
+        percentage = (count / total_traces) * 100
 
         # Format category name for display
         display_name = category_name.replace("_", " ").title()
 
         report += f"[bold bright_cyan]{idx}.[/bold bright_cyan] [bold bright_magenta]{display_name}[/bold bright_magenta]\n\n"
-        report += f"[cyan]Count:[/cyan] {count} ({percentage:.1f}% of failures)\n\n"
+        report += f"[cyan]Count:[/cyan] {count} ({percentage:.1f}% of traces)\n\n"
 
         if category_info:
-            report += f"{category_info.failure_category_definition}\n\n"
+            report += f"{category_info.pattern_category_definition}\n\n"
 
         # Add examples section only if there are notes to show
         has_examples = any(trace["notes"] for trace in traces[:5])

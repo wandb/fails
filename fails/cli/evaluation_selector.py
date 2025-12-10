@@ -4,8 +4,10 @@ Interactive selector for entering a Weave Evaluation ID or URL.
 Uses prompt_toolkit for robust paste handling and clean UI.
 """
 
+import json
 import re
 from typing import Optional
+from urllib.parse import unquote
 from prompt_toolkit import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
@@ -23,12 +25,16 @@ class UserCancelledException(Exception):
 
 
 class EvaluationSelector:
-    """Simple selector for entering a Weave Evaluation URL."""
-    
+    """Simple selector for entering a Weave Evaluation URL or Trace URL with filters."""
+
     # Regex patterns for extracting components from URL
-    # Example URL: https://wandb.ai/wandb-applied-ai-team/eval-failures/weave/calls/01985cfc-6d70-711f-89b7-bb22c693ca75
+    # Example Evaluation URL: https://wandb.ai/wandb-applied-ai-team/eval-failures/weave/calls/01985cfc-6d70-711f-89b7-bb22c693ca75
+    # Example Trace URL: https://wandb.ai/wandb-smle/hiring-agent-demo-public/weave/traces?filters={...}
     # Pattern to match both direct calls and evaluation URLs with peekPath
     URL_PATTERN = r'https?://wandb\.ai/([^/]+)/([^/]+)/weave/(?:calls/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})|evaluations\?.*peekPath=%2F[^%]+%2F[^%]+%2Fcalls%2F([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))'
+
+    # Pattern to match trace URLs with filters
+    TRACE_URL_PATTERN = r'https?://wandb\.ai/([^/]+)/([^/]+)/weave/traces\?.*filters=([^&]+)'
     
     # Legacy patterns for backward compatibility
     ID_PATTERNS = [
@@ -41,32 +47,51 @@ class EvaluationSelector:
     def __init__(self, default_value: Optional[str] = None):
         self.default_value = default_value
         self.example_url = "https://wandb.ai/your-entity/your-project/weave/calls/01985cfc-6d70-711f-89b7-bb22c693ca75"
-        self.result = None  # Will be tuple of (entity, project, eval_id)
+        self.result = None  # Will be tuple of (entity, project, eval_id, filters) where filters is None or dict
         self.error_message = ""
-        self.MAX_INPUT_SIZE = 1000
+        self.MAX_INPUT_SIZE = 2000  # Increased to handle trace URLs with filters
     
     def extract_components_from_url(self, url: str) -> Optional[tuple]:
-        """Extract entity, project, and evaluation ID from a Weave URL.
-        
+        """Extract entity, project, eval_id/filters from a Weave URL.
+
         Returns:
-            Tuple of (entity, project, eval_id) or None if extraction fails
+            Tuple of (entity, project, eval_id, filters) where:
+            - For evaluation URLs: (entity, project, eval_id, None)
+            - For trace URLs: (entity, project, None, filters_dict)
+            - Returns None if extraction fails
         """
-        # Try to match the full URL pattern
+        # First try to match trace URL pattern
+        trace_match = re.search(self.TRACE_URL_PATTERN, url)
+        if trace_match:
+            entity = trace_match.group(1)
+            project = trace_match.group(2)
+            filters_encoded = trace_match.group(3)
+
+            # URL-decode and parse the filters JSON
+            try:
+                filters_json = unquote(filters_encoded)
+                filters = json.loads(filters_json)
+                return (entity, project, None, filters)
+            except (json.JSONDecodeError, Exception) as e:
+                # If filter parsing fails, return None
+                return None
+
+        # Try to match evaluation URL pattern
         match = re.search(self.URL_PATTERN, url)
         if match:
             entity = match.group(1)
             project = match.group(2)
             # Group 3 is for direct calls, group 4 is for evaluation peekPath
             eval_id = match.group(3) or match.group(4)
-            return (entity, project, eval_id)
-        
+            return (entity, project, eval_id, None)
+
         # Fallback: try to extract just the ID for backward compatibility
         for pattern in self.ID_PATTERNS:
             match = re.search(pattern, url)
             if match:
-                # Return None for entity/project if we can only extract ID
-                return (None, None, match.group(1))
-        
+                # Return None for entity/project/filters if we can only extract ID
+                return (None, None, match.group(1), None)
+
         return None
     
     def validate_id(self, eval_id: str) -> bool:
@@ -76,30 +101,30 @@ class EvaluationSelector:
         return bool(re.match(pattern, eval_id.lower()))
     
     def extract_safely(self, input_str: str) -> Optional[tuple]:
-        """Try to extract entity, project, and evaluation ID from input.
-        
+        """Try to extract entity, project, eval_id, and filters from input.
+
         Returns:
-            Tuple of (entity, project, eval_id) or None if extraction fails
+            Tuple of (entity, project, eval_id, filters) or None if extraction fails
         """
         # Limit how much we search through
         if len(input_str) > 5000:
             input_str = input_str[:5000]
-        
+
         clean_input = input_str.strip()
-        
+
         # Try to extract from URL
         result = self.extract_components_from_url(clean_input)
         if result:
             return result
-        
+
         # For backward compatibility: check if it's a direct ID
         if self.validate_id(clean_input):
-            return (None, None, clean_input)
-        
+            return (None, None, clean_input, None)
+
         return None
     
     def run(self) -> Optional[tuple]:
-        """Run the selector using prompt_toolkit and return (entity, project, eval_id)."""
+        """Run the selector using prompt_toolkit and return (entity, project, eval_id, filters)."""
         
         # Create the text input area with multiline support
         text_area = TextArea(
@@ -118,12 +143,13 @@ class EvaluationSelector:
         header_parts.extend(get_fails_header_for_prompt_toolkit())
         header_parts.extend([
             ('', '\n'),
-            ('class:step_header', 'Step 1: Enter a Weave Evaluation URL\n'),
+            ('class:step_header', 'Step 1: Enter a Weave Evaluation or Trace URL\n'),
             ('', '\n'),
-            ('', 'Please provide a Weave Evaluation URL, the URL should look like:\n'),
-            ('', f'  {self.example_url}...\n'),
+            ('', 'Please provide either:\n'),
+            ('', '  • Evaluation URL: https://wandb.ai/entity/project/weave/calls/EVAL_ID\n'),
+            ('', '  • Trace URL with filters: https://wandb.ai/entity/project/weave/traces?filters={...}\n'),
             ('', '\n'),
-            ('class:instructions', 'Hint: Click on the evaluation row in the Evals tab in Weave, then copy the URL.\n'),
+            ('class:instructions', 'Hint: Copy the URL from your browser when viewing evaluations or filtered traces in Weave.\n'),
             ('', '\n'),
             ('', '─' * 105 + '\n'),
             ('class:instructions', "Enter: Submit    Ctrl+U: Clear    Ctrl+C: Cancel\n"),
@@ -253,29 +279,37 @@ class EvaluationSelector:
         
         # Print confirmation if we got valid results
         if result:
-            entity, project, eval_id = result
+            entity, project, eval_id, filters = result
             if entity and project:
                 print("\n\033[95m✓\033[0m Extracted from URL:")
                 print(f"    Entity: \033[96m{entity}\033[0m")
                 print(f"    Project: \033[96m{project}\033[0m")
-                print(f"    Evaluation ID: \033[96m{eval_id}\033[0m")
+                if eval_id:
+                    print(f"    Evaluation ID: \033[96m{eval_id}\033[0m")
+                if filters:
+                    print(f"    Filters: \033[96m{json.dumps(filters, indent=2)}\033[0m")
                 print("\n")
             else:
-                print(f"\n\033[95m✓\033[0m Valid Weave Evaluation ID extracted: \033[96m{eval_id}\033[0m")
+                if eval_id:
+                    print(f"\n\033[95m✓\033[0m Valid Weave Evaluation ID extracted: \033[96m{eval_id}\033[0m")
+                else:
+                    print(f"\n\033[95m✓\033[0m Extracted filters from trace URL")
         
         return result
 
 
 def interactive_evaluation_selection(console=None, default_value: Optional[str] = None) -> Optional[tuple]:
     """
-    Interactive function to select a Weave evaluation from URL.
-    
+    Interactive function to select a Weave evaluation or trace URL.
+
     Args:
         console: Optional Rich console (not used, kept for compatibility)
-        default_value: Optional default evaluation URL
-        
+        default_value: Optional default evaluation/trace URL
+
     Returns:
-        Tuple of (entity, project, eval_id) or None if cancelled
+        Tuple of (entity, project, eval_id, filters) or None if cancelled
+        - For evaluation URLs: (entity, project, eval_id, None)
+        - For trace URLs: (entity, project, None, filters_dict)
     """
     # If console is a string, treat it as the default_value for backward compatibility
     if isinstance(console, str):
@@ -296,16 +330,19 @@ def main():
     """Test the selector."""
     try:
         result = interactive_evaluation_selection()
-        
+
         if result:
-            entity, project, eval_id = result
+            entity, project, eval_id, filters = result
             print("Selected:")
             if entity and project:
                 print(f"  Entity: {entity}")
                 print(f"  Project: {project}")
-            print(f"  Evaluation ID: {eval_id}")
+            if eval_id:
+                print(f"  Evaluation ID: {eval_id}")
+            if filters:
+                print(f"  Filters: {json.dumps(filters, indent=2)}")
         else:
-            print("No evaluation selected.")
+            print("No evaluation/trace selected.")
     except KeyboardInterrupt:
         print("\nCancelled.")
     except Exception as e:

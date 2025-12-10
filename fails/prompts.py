@@ -2,33 +2,35 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
-EVALUATION_FAILURE_DEFINITION = """An evaluation failure is defined as the output of a single row \
-that failed the evaluator or scorer criteria. An individual row that failed can evaluation might do so for a \
-number of reasons such as:
+TRACE_PATTERN_DEFINITION = """A trace represents a single execution of a system that has been selected for analysis. \
+Traces may be selected because they exhibit specific behaviors, contain errors, fail certain criteria, or match other \
+filter conditions. Each trace may exhibit issues or patterns such as:
 
-- The output was judged to be incorrect by the evaluator or scorer
-- The output was not formatted correctly.
-- The output had a code execution error.
+- Incorrect outputs or behaviors
+- Formatting problems or structured output errors
+- Execution errors or exceptions
+- Too many tool calls or infinite loops
+- Edge cases or unusual behaviors
+- Performance issues or timeouts
 - etc.
 """
 
 FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT = f"""
-# Task - Evaluation Failure Categorization
+# Task - Trace Pattern Categorization
 
-Your task is to output a draft set of notes and candiate task failure categories given evaluation failures \
-data from a users AI system. We are trying to help a user understand the nature of the failures in their AI system \
-and identify the root causes of the failures.
+Your task is to output a draft set of notes and candidate pattern categories given trace data from a user's AI system. \
+We are trying to help a user understand key failure modes and behavioral patterns in their AI system.
 
-## Evaluation Failure Definition
+## Trace Definition
 
-{EVALUATION_FAILURE_DEFINITION}
+{TRACE_PATTERN_DEFINITION}
 
-### How Your Notes and Candidate Task Failure Categories Will Be Used
+### How Your Notes and Candidate Pattern Categories Will Be Used
 
-With this rough draft of failure categories and notes for 1 or a small number of rows, a later step in this pipeline \
-will subsequently compare the draft notes and candidate task failure categories across a larger number of rows. \
-From here, we will iteratively align and refine the notes and candidate task failure categories until we \
-have a set of notes and candidate task failure categories that are consistent across a larger number of rows.
+With this rough draft of pattern categories and notes for 1 or a small number of traces, a later step in this pipeline \
+will subsequently compare the draft notes and candidate pattern categories across a larger number of traces. \
+From here, we will iteratively align and refine the notes and candidate pattern categories until we \
+have a set of pattern categories that are consistent across a larger number of traces.
 
 ## Inspiration - Open Coding
 
@@ -37,78 +39,84 @@ This task is similar to open coding, where we are trying to identify the underly
 > Open coding attempts to codify, name or classifying the observed phenomenon and is achieved by segmenting \
 data into meaningful expressions and describing that data with a single word or short sequence of words
 
-Some examples of open coding questions to consider when drafting the notes and candidate task failure categories:
+Some examples of open coding questions to consider when drafting the notes and candidate pattern categories:
 
 - Identify the underlying issue and phenomenon *(What?*)
 - Identify the phenomenon's attributes *(What kind?*)
-- Determine the time, course and location of the failure *(When? How long? Where?)*
-- Identify the intensity of the failure (*How much? How long?*)
-- Identify the reasons attached to the failure (*Why?*)
-- Identify intention or purpose of the failure (*Why?)*
+- Determine the time, course and location of the behavior *(When? How long? Where?)*
+- Identify the intensity of the issue (*How much? How long?*)
+- Identify the reasons attached to the issue (*Why?*)
+- Identify intention or purpose of the behavior (*Why?)*
 
-Take inspiration from the above open coding questions but there is no need to be exhaustive if its not relevant \
-to the failure data in question.
+Take inspiration from the above open coding questions but there is no need to be exhaustive if it's not relevant \
+to the trace data in question.
 
 ## Notes on User-provided Data
 
-### Ground Truth Labels
+### Human Annotations
 
-Note that for this task we assume that provided ground truth labels are correct. This is not the place to speculate \
-about the correctness of the ground truth labels.
+If human annotations are provided, these represent real observations from human reviewers. Pay close attention to \
+annotated error categories or issues, as these are valuable signals for identifying patterns.
 
-### User-provided eval reasoning
+### Automated Scores
 
-Be cautious if the users eval data has provided a 'thinking', 'reasoning' or 'notes' section as part of the justification \
-for the eval decision. These 'reasons' for the eval decision might have come from a LLM and should not be treated as absolute \
-truth. You can still use any clearly correct insights from the user-provided eval reasoning, just be cautious about trusting \
-it 100%.
+If automated scores are provided (e.g., from scorers or evaluators), use these as indicators but don't treat them \
+as absolute truth. Scores can have false positives or false negatives. Look at the actual trace data to understand \
+what's really happening.
+
+### LLM-generated Reasoning
+
+Be cautious if the trace data includes 'thinking', 'reasoning' or 'notes' sections that may have come from an LLM. \
+These should not be treated as absolute truth. You can still use clearly correct insights, just be cautious about \
+trusting them 100%.
 """
 
 FIRST_PASS_CATEGORIZATION_PROMPT = """
-Given the specific task context from the user as well as the evaluation failure data, please make your best \
-guess at the notes and candidate task failure categories for the given row input and row output.
+Given the specific task context from the user as well as the trace data, please make your best \
+guess at the notes and candidate pattern categories for the given trace.
 
 ## User context about their AI system
 
-Below is the context from the user about their AI system and what they are trying to evaluate. This might add \
-context to the evaluation failure data below and help you better understand what the user is trying to achieve with \
-their AI system.
+Below is the context from the user about their AI system and what they are trying to analyze. This will help \
+you better understand what the user is trying to achieve with their AI system.
 
 <user_context>
 {user_context}
 </user_context>
 
-## Evaluation Failure Data
+{human_annotations_section}
+
+## Trace Data
 
 ### Inputs that were given to the system
-<row_input>
-{row_input}
-</row_input>
+<trace_input>
+{trace_input}
+</trace_input>
 
-### Outputs that were evaluated to be failures
-<row_output>
-{row_output}
-</row_output>
+### Outputs from the system
+<trace_output>
+{trace_output}
+</trace_output>
 
-### Evaluation or Scorer data and metadata
+### Additional Metadata (scores, timestamps, etc.)
 
-<evaluation_evaluation_or_scorer_data>
-{evaluation_evaluation_or_scorer_data}
-</evaluation_evaluation_or_scorer_data>
+<trace_metadata>
+{trace_metadata}
+</trace_metadata>
 
-## Analyse and Draft Notes and Candidate Task Failure Categories
+## Analyze and Draft Notes and Candidate Pattern Categories
 
-With the above user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output. 
+With the above user context and trace data, please output a draft set of notes and candidate \
+pattern categories for the given trace.
 
-### Specificity of Candidate Task Failure Categories
+### Specificity of Candidate Pattern Categories
 
 Try and be as specific as possible in your categorizations without literally incorporating every single detail of the \
-single eval failure given.
+single trace given. The goal is to identify patterns that will likely appear across multiple traces.
 
-### Style of Candidate Task Failure Categories
+### Style of Candidate Pattern Categories
 
-Ensure that the candidate task failure categories are:
+Ensure that the candidate pattern categories are:
 - concise and to the point
 - lowercase
 - separated by underscores
@@ -117,55 +125,60 @@ Ensure that the candidate task failure categories are:
 
 
 class FirstPassCategory(BaseModel):
-    """A first pass categorization of a single evaluation failure."""
+    """A first pass categorization of a single trace."""
 
     category_name: str = Field(description="The name of the category.")
     category_description: str = Field(
         description="A high-level, generic, short description and justification for the category."
     )
-    eval_failure_note: str = Field(
-        description="A sentence or two of notes sepcific to what was observed in this individual evaluation failure."
+    trace_note: str = Field(
+        description="A sentence or two of notes specific to what was observed in this individual trace."
     )
 
 
 class FirstPassCategorization(BaseModel):
-    """First pass classification of a single evaluation failure."""
+    """First pass classification of a single trace."""
 
     thinking: str = Field(
         description="A detailed thinking process of the classification."
     )
     first_pass_categories: list[FirstPassCategory] = Field(
-        description="A short list of 1-3 first pass categories for the evaluation failure."
+        description="A short list of 1-3 first pass categories for the trace."
     )
 
 
 class FirstPassCategorizationResult(FirstPassCategorization):
-    """First pass classification of a single evaluation failure."""
+    """First pass classification of a single trace."""
 
     trace_id: str = Field(description="The ID of the trace that was classified.")
 
 
 # ----------------- Clustering draft categorizations -----------------
 
-MAX_N_TASK_FAILURE_CATEGORIES = 7
+MAX_N_PATTERN_CATEGORIES = 7
 
 CLUSTERING_SYSTEM_PROMPT = f"""# Task - Clustering Draft Categorizations
 
-Given {{num_traces}} of draft categorizations and notes for a set of evaluation failures, cluster \
-the categorizations and notes into a defined set of task failure categories.
+Given {{num_traces}} of draft categorizations and notes for a set of traces, cluster \
+the categorizations and notes into a defined set of pattern categories.
 
-## Definition - Evaluation Failure
+## Definition - Trace Patterns
 
-{EVALUATION_FAILURE_DEFINITION}
+{TRACE_PATTERN_DEFINITION}
 
 ## Task Context - Clustering Draft Categorizations
 
-The purpose of this task is examine draft categorizations and notes for a set of evaluation failures and cluster the \
-categories into a canonical set of task failure categories. The aim is to find a set of task failure categories that \
-are consistent across a large number of evaluation failures, ideally we have no more than \
-{MAX_N_TASK_FAILURE_CATEGORIES} eval failure categories.
+The purpose of this task is to examine draft categorizations and notes for a set of traces and cluster the \
+categories into a canonical set of pattern categories. The aim is to find a set of pattern categories that \
+are consistent across a large number of traces, ideally we have no more than \
+{MAX_N_PATTERN_CATEGORIES} pattern categories.
 
-If a trace doesn't fit into any of the defined task failure categories, it should be classified as "other".
+These categories should be specific enough to:
+1. Clearly identify failure modes or problematic behaviors
+2. Highlight distinct behavioral patterns that could be monitored
+3. Be potentially converted into automated scorers for ongoing monitoring
+
+If a trace doesn't fit into any of the defined pattern categories, it should be classified as "other".
 
 Keep all category names lowercase, concise and separated by '_'.
 """
@@ -182,65 +195,65 @@ Here are the draft categorizations and notes for {{num_traces}} traces:
 
 ## Output
 
-Output a list of maximum {MAX_N_TASK_FAILURE_CATEGORIES} task failure categories - you can output less than \
-{MAX_N_TASK_FAILURE_CATEGORIES} if you think that's appropriate.
+Output a list of maximum {MAX_N_PATTERN_CATEGORIES} pattern categories - you can output less than \
+{MAX_N_PATTERN_CATEGORIES} if you think that's appropriate.
 """
 
 ## ----------------- Step 3 - Category Review -----------------
 
 
 class Category(BaseModel):
-    """A task failure category."""
+    """A pattern category."""
 
     thinking: str = Field(
         description="A detailed reasoning process behind the selection of the category \
 name, description and notes."
     )
-    failure_category_name: str = Field(
-        description="""The name of the task failure category. Keep all category \
-names lowercase, concise and separated by '_'. If a trace doesn't fit into any of the defined task failure \
+    pattern_category_name: str = Field(
+        description="""The name of the pattern category. Keep all category \
+names lowercase, concise and separated by '_'. If a trace doesn't fit into any of the defined pattern \
 categories, it should be classified as 'other'."""
     )
-    failure_category_definition: str = Field(
-        description="A short definition of the task failure category."
+    pattern_category_definition: str = Field(
+        description="A short definition of the pattern category."
     )
-    failure_category_notes: str = Field(
-        description="A sentence or two of notes for the task failure category."
+    pattern_category_notes: str = Field(
+        description="A sentence or two of notes for the pattern category."
     )
 
 
 class ClusteringCategories(BaseModel):
-    """Clustering of draft categorizations and notes into a set of task failure categories."""
+    """Clustering of draft categorizations and notes into a set of pattern categories."""
 
     category_long_list_thinking: str = Field(
         description="A detailed reasoning process and final decision making \
-for the selection of the task failure categories."
+for the selection of the pattern categories."
     )
-    task_failure_categories: list[Category] = Field(
-        description="""A list of task failure categories. \
-If a trace doesn't fit into any of the defined task failure categories, it should be classified as "other"."""
+    pattern_categories: list[Category] = Field(
+        description="""A list of pattern categories. \
+If a trace doesn't fit into any of the defined pattern categories, it should be classified as "other"."""
     )
 
 
 # ----------------- Step 3 - Final Classification -----------------
 
 FINAL_CLASSIFICATION_SYSTEM_PROMPT = """
-# Task - Final Classification of Evaluation Failures
+# Task - Final Classification of Traces
 
-You are a helpful assistant that classifies evaluation failures into predefined categories.
+You are a helpful assistant that classifies traces into predefined pattern categories.
 
-Your task is to analyze a single evaluation failure and classify it into one of the provided task failure categories.
+Your task is to analyze a single trace and classify it into one of the provided pattern categories.
 
 ## Important Notes:
 - You must select exactly ONE category from the provided list
-- If the failure doesn't clearly fit into any of the predefined categories, classify it as "other"
-- Base your classification on the actual failure data, not on assumptions
-- Consider the user context to better understand the nature of the failure
+- If the trace doesn't clearly fit into any of the predefined categories, classify it as "other"
+- Base your classification on the actual trace data, not on assumptions
+- Consider the user context to better understand the nature of the behavior or issue
 """
 
 FINAL_CLASSIFICATION_PROMPT = """
-Given the following evaluation failure data and the list of available failure categories, \
-classify this specific failure into the most appropriate category.
+Given the following trace data and the list of available pattern categories, \
+classify this specific trace into the most appropriate category.
 
 ## User Context
 
@@ -248,50 +261,52 @@ classify this specific failure into the most appropriate category.
 {user_context}
 </user_context>
 
-## Evaluation Failure Data
+{human_annotations_section}
+
+## Trace Data
 
 ### Inputs that were given to the system
-<row_input>
-{row_input}
-</row_input>
+<trace_input>
+{trace_input}
+</trace_input>
 
-### Outputs that were evaluated to be failures
-<row_output>
-{row_output}
-</row_output>
+### Outputs from the system
+<trace_output>
+{trace_output}
+</trace_output>
 
-### Evaluation or Scorer data and metadata
-<evaluation_evaluation_or_scorer_data>
-{evaluation_evaluation_or_scorer_data}
-</evaluation_evaluation_or_scorer_data>
+### Additional Metadata (scores, timestamps, etc.)
+<trace_metadata>
+{trace_metadata}
+</trace_metadata>
 
-## Available Failure Categories
+## Available Pattern Categories
 
-<available_failure_categories>
-{available_failure_categories}
-</available_failure_categories>
+<available_pattern_categories>
+{available_pattern_categories}
+</available_pattern_categories>
 
 ## Task
 
-Analyze the above evaluation failure and classify it into ONE of the available categories. \
+Analyze the above trace and classify it into ONE of the available categories. \
 If none of the categories are appropriate, classify it as "other".
 """
 
 
 class FinalClassification(BaseModel):
-    """Final classification of a single evaluation failure into predefined categories."""
+    """Final classification of a single trace into predefined categories."""
 
     thinking: str = Field(
-        description="A detailed reasoning process explaining why this specific failure \
-belongs to the selected category. Consider the failure characteristics, the category \
+        description="A detailed reasoning process explaining why this specific trace \
+belongs to the selected category. Consider the trace characteristics, the category \
 definitions, and why this is the best match among all available categories."
     )
-    failure_category: str = Field(
-        description="The selected category name from the available failurecategories. \
+    pattern_category: str = Field(
+        description="The selected category name from the available pattern categories. \
 Must be one of the provided category names or 'other'."
     )
     categorization_reason: str = Field(
-        description="Brief notes explaining any specific aspects of this sampled failure \
+        description="Brief notes explaining any specific aspects of this trace \
 that influenced the classification decision."
     )
 
@@ -302,76 +317,8 @@ class FinalClassificationResult(FinalClassification):
     trace_id: str = Field(description="The ID of the trace that was classified.")
 
 
-# Legacy models kept for backwards compatibility
-CATEGORIZATION_REVIEW_SYSTEM_PROMPT = """
-You are a helpful assistant that categorizes task failure categories.
-
-Given a proposed list of evaluation failure categories and the eval failtures themselves, determine \
-if the proposed categories are appropriate.
-
-If the proposed categories are appropriate, return the proposed categories.
-
-If the proposed categories are not appropriate, return a new list of categories that are appropriate \
-as well as a note explaining why the proposed categories are not appropriate.
-"""
-
-CATEGORIZATION_REVIEW_PROMPT = """
-Given the following user context and evaluation failure data, please output a draft set of notes and candidate \
-task failure categories for the given row input and row output.
-
-## User Context
-
-<user_context>
-{user_context}
-</user_context>
-
-## Evaluation Failure Data
-
-### Inputs that were given to the system
-<row_input>
-{row_input}
-</row_input>
-
-### Outputs that were evaluated to be failures
-<row_output>
-{row_output}
-</row_output>
-
-### Evaluation or Scorer data and metadata
-
-<evaluation_evaluation_or_scorer_data>
-{evaluation_evaluation_or_scorer_data}
-</evaluation_evaluation_or_scorer_data>
-
-## Proposed list of available failure categories
-
-
-<proposed_failure_categories>
-{proposed_failure_categories}
-</proposed_failure_categories>
-
-Does the eval failure you can see above fall into any of the proposed failure categories?
-"""
-
-
-class CategoryReview(BaseModel):
-    """A task failure category."""
-
-    thinking: str = Field(
-        description="A detailed reasoning process behind the selection of the category \
-name, description and notes."
-    )
-    candidate_categories_appropriate: bool = Field(
-        description="Whether the proposed failure categories are appropriate for the eval failure."
-    )
-    new_category_proposal: Category | None = Field(
-        description="If the proposed failure categories are not appropriate, return a new \
-category that is appropriate for this particular eval failure."
-    )
-
-
 # -----------------------------------------------------
 class PipelineResult(BaseModel):
-    failure_categories: List[Category]
+    pattern_categories: List[Category]
     classifications: List[FinalClassificationResult]
     report: str = ""

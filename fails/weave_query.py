@@ -531,6 +531,184 @@ class WeaveQueryClient:
 
         return self._execute_query(query)
 
+    def query_traces_with_filters(
+        self,
+        weave_filters: Dict[str, Any],
+        columns: Optional[List[str]] = None,
+        limit: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Query traces directly using Weave UI filters (from trace URL).
+
+        This method converts Weave UI filter format to the API filter format.
+        Weave UI filters have structure like:
+        {
+            "items": [
+                {"field": "started_at", "operator": "(date): before", "value": "2025-04-24T22:00:00.000Z"},
+                {"field": "output.has_hallucination", "operator": "(bool): is", "value": "false"}
+            ],
+            "logicOperator": "and"
+        }
+
+        Args:
+            weave_filters: Filter object from Weave UI (from trace URL)
+            columns: Columns to retrieve
+            limit: Maximum number of results
+
+        Returns:
+            List of trace dictionaries matching the filters
+        """
+        if columns is None:
+            columns = [
+                "id",
+                "trace_id",
+                "parent_id",
+                "started_at",
+                "ended_at",
+                "op_name",
+                "display_name",
+                "inputs",
+                "output",
+                "summary",
+                "exception",
+                "attributes",
+            ]
+
+        # Build query structure
+        query = {
+            "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
+            "filter": {},
+            "columns": columns,
+            "sort_by": [{"field": "started_at", "direction": "asc"}],
+        }
+
+        # Convert Weave UI filters to API filter format
+        filter_items = weave_filters.get("items", [])
+        if filter_items:
+            expr_conditions = []
+
+            for item in filter_items:
+                field = item.get("field")
+                operator = item.get("operator", "")
+                value = item.get("value")
+
+                # Map Weave UI operators to our filter format
+                if "(bool): is" in operator:
+                    # Boolean equality
+                    bool_value = value.lower() == "true"
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": str(bool_value).lower()}
+                        ]
+                    })
+                elif "(date): before" in operator:
+                    # Date less than
+                    # Convert ISO date string to timestamp if needed
+                    if isinstance(value, str):
+                        from datetime import datetime
+                        try:
+                            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                            timestamp = dt.timestamp()
+                        except:
+                            timestamp = value
+                    else:
+                        timestamp = value
+
+                    expr_conditions.append({
+                        "$not": [{
+                            "$gte": [
+                                {"$getField": field},
+                                {"$literal": timestamp}
+                            ]
+                        }]
+                    })
+                elif "(date): after" in operator:
+                    # Date greater than
+                    if isinstance(value, str):
+                        from datetime import datetime
+                        try:
+                            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                            timestamp = dt.timestamp()
+                        except:
+                            timestamp = value
+                    else:
+                        timestamp = value
+
+                    expr_conditions.append({
+                        "$gt": [
+                            {"$getField": field},
+                            {"$literal": timestamp}
+                        ]
+                    })
+                elif "(string): contains" in operator:
+                    expr_conditions.append({
+                        "$contains": {
+                            "input": {"$getField": field},
+                            "substr": {"$literal": value}
+                        }
+                    })
+                elif "(string): equals" in operator or operator == "=":
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": value}
+                        ]
+                    })
+                elif "(number): >" in operator or operator == ">":
+                    expr_conditions.append({
+                        "$gt": [
+                            {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                            {"$literal": float(value)}
+                        ]
+                    })
+                elif "(number): <" in operator or operator == "<":
+                    expr_conditions.append({
+                        "$not": [{
+                            "$gte": [
+                                {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                                {"$literal": float(value)}
+                            ]
+                        }]
+                    })
+                elif "(number): >=" in operator or operator == ">=":
+                    expr_conditions.append({
+                        "$gte": [
+                            {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                            {"$literal": float(value)}
+                        ]
+                    })
+                elif "(number): <=" in operator or operator == "<=":
+                    expr_conditions.append({
+                        "$not": [{
+                            "$gt": [
+                                {"$convert": {"input": {"$getField": field}, "to": "double"}},
+                                {"$literal": float(value)}
+                            ]
+                        }]
+                    })
+                else:
+                    # Default to equality
+                    expr_conditions.append({
+                        "$eq": [
+                            {"$getField": field},
+                            {"$literal": value}
+                        ]
+                    })
+
+            # Combine conditions based on logic operator
+            logic_op = weave_filters.get("logicOperator", "and")
+            if expr_conditions:
+                if logic_op == "or":
+                    query["query"] = {"$expr": {"$or": expr_conditions}}
+                else:  # default to "and"
+                    query["query"] = {"$expr": {"$and": expr_conditions}}
+
+        if limit is not None:
+            query["limit"] = limit
+
+        return self._execute_query(query)
+
     def query_descendants_recursive(
         self,
         parent_id: str,
@@ -769,6 +947,104 @@ class WeaveQueryClient:
             raise
         except Exception as e:
             print(f"Unexpected error resolving refs: {type(e).__name__}: {e}")
+            raise
+
+    def get_feedback(
+        self,
+        call_ids: Optional[List[str]] = None,
+        weave_ref: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch feedback/annotations for specific calls using the REST API.
+
+        Args:
+            call_ids: List of call IDs to fetch feedback for
+            weave_ref: Weave reference to fetch feedback for
+
+        Returns:
+            List of feedback objects with structure:
+            - id: Feedback ID
+            - created_at: Timestamp
+            - feedback_type: Type of feedback (reaction, note, annotation, etc.)
+            - payload: The actual feedback data
+            - weave_ref: Reference to the call this feedback is for
+
+        Raises:
+            requests.HTTPError: If the API request fails
+        """
+        endpoint = f"{self.config.base_url}/feedback/query"
+
+        # Build query with proper operation format (AndOperation, EqOperation, etc.)
+        query = {
+            "project_id": f"{self.config.wandb_entity}/{self.config.wandb_project}",
+        }
+
+        # Add filters if provided - use same format as calls API
+        if call_ids:
+            if len(call_ids) == 1:
+                # Single call_id - use $eq
+                weave_ref_value = f"weave:///{self.config.wandb_entity}/{self.config.wandb_project}/call/{call_ids[0]}"
+                query["query"] = {
+                    "$expr": {
+                        "$eq": [
+                            {"$getField": "weave_ref"},
+                            {"$literal": weave_ref_value}
+                        ]
+                    }
+                }
+            else:
+                # Multiple call_ids - build OR conditions for each ref
+                weave_refs = [
+                    f"weave:///{self.config.wandb_entity}/{self.config.wandb_project}/call/{call_id}"
+                    for call_id in call_ids
+                ]
+                # Create an $or with individual $eq conditions
+                or_conditions = [
+                    {
+                        "$eq": [
+                            {"$getField": "weave_ref"},
+                            {"$literal": ref}
+                        ]
+                    }
+                    for ref in weave_refs
+                ]
+                query["query"] = {
+                    "$expr": {
+                        "$or": or_conditions
+                    }
+                }
+        elif weave_ref:
+            # Single weave_ref filter
+            query["query"] = {
+                "$expr": {
+                    "$eq": [
+                        {"$getField": "weave_ref"},
+                        {"$literal": weave_ref}
+                    ]
+                }
+            }
+
+        try:
+            response = self._make_api_request(
+                url=endpoint,
+                headers=self.headers,
+                data=query,
+                timeout=30,
+                stream=False
+            )
+
+            result = response.json()
+            return result.get("result", [])
+
+        except requests.HTTPError as e:
+            # 404 is acceptable - means no feedback exists
+            if e.response and e.response.status_code == 404:
+                return []
+            print(f"Error fetching feedback: {e}")
+            print(f"Response: {e.response.text if e.response else 'No response'}")
+            raise
+        except Exception as e:
+            print(f"Unexpected error fetching feedback: {type(e).__name__}: {e}")
             raise
 
     @staticmethod
@@ -1527,5 +1803,146 @@ def get_available_columns(
         "sample_child_id": sample_trace.get("id", ""),
         "sample_child_op_name": sample_trace.get("op_name", ""),
     }
-    
+
+    return result
+
+
+def query_trace_data_with_filters(
+    weave_filters: Dict[str, Any],
+    wandb_entity: str,
+    wandb_project: str,
+    columns: Optional[List[str]] = None,
+    include_outputs: bool = True,
+    limit: int | None = None,
+    resolve_refs: bool = True,
+    replace_refs: bool = True,
+    deep_ref_extraction: bool = False,
+) -> Dict[str, Any]:
+    """
+    Query Weave trace data directly using UI filters (from trace URL).
+
+    This function queries traces based on filters from the Weave UI instead of
+    requiring a parent evaluation. It's designed to work with trace URLs that
+    contain filter parameters.
+
+    Args:
+        weave_filters: Filter object from Weave UI (from trace URL)
+        wandb_entity: W&B entity name
+        wandb_project: W&B project name
+        columns: Optional list of columns to retrieve
+        include_outputs: Include output column
+        limit: Maximum number of traces to return
+        resolve_refs: If True, automatically resolve all Weave refs found
+        replace_refs: If True, replace refs in traces with their resolved values
+        deep_ref_extraction: If True, extract all nested refs
+
+    Returns:
+        Dictionary with:
+        - children: List of trace dictionaries matching the filters
+        - refs_by_trace: Mapping of trace_id to refs found (if resolve_refs=True)
+        - resolved_refs: Dict mapping ref strings to resolved values (if resolve_refs=True)
+    """
+    if wandb_entity == "" or wandb_project == "":
+        raise ValueError("wandb_entity and wandb_project must be set")
+
+    # Ensure we include the necessary columns
+    if columns is None:
+        columns = [
+            "id",
+            "parent_id",
+            "trace_id",
+            "op_name",
+            "display_name",
+            "started_at",
+            "ended_at",
+            "inputs",
+            "attributes",
+            "summary",
+            "exception",
+        ]
+        if include_outputs:
+            columns.append("output")
+    else:
+        # Ensure we have the columns needed for ref extraction
+        for col in ["inputs", "output", "attributes"]:
+            if col not in columns and (col != "output" or include_outputs):
+                columns = columns.copy()
+                columns.append(col)
+
+    # Query traces using filters
+    config = WeaveQueryConfig(wandb_entity=wandb_entity, wandb_project=wandb_project)
+    client = WeaveQueryClient(config)
+
+    traces = client.query_traces_with_filters(
+        weave_filters=weave_filters, columns=columns, limit=limit
+    )
+
+    result = {"children": traces}
+
+    # Extract refs from all traces
+    if resolve_refs or replace_refs:
+        refs_by_trace = client.extract_refs_from_traces(traces, deep=deep_ref_extraction)
+        result["refs_by_trace"] = refs_by_trace
+
+        if resolve_refs and refs_by_trace:
+            # Collect all unique refs
+            all_refs = set()
+            for trace_refs in refs_by_trace.values():
+                for path, ref_or_refs in trace_refs.items():
+                    if isinstance(ref_or_refs, list):
+                        all_refs.update(ref_or_refs)
+                    else:
+                        all_refs.add(ref_or_refs)
+
+            # Resolve in batch
+            unique_refs = sorted(all_refs)
+            if unique_refs:
+                try:
+                    resolved_values = client.read_refs_batch(unique_refs)
+                    resolved_refs = dict(zip(unique_refs, resolved_values))
+                    result["resolved_refs"] = resolved_refs
+
+                    # Replace refs in traces if requested
+                    if replace_refs:
+                        updated_traces = client.replace_refs_in_traces(traces, resolved_refs)
+                        result["children"] = updated_traces
+                except Exception as e:
+                    # If ref resolution fails, continue without it
+                    print(f"Warning: Could not resolve refs: {e}")
+
+    # Fetch feedback/annotations for all traces
+    try:
+        call_ids = [trace.get("id") for trace in traces if trace.get("id")]
+        if call_ids:
+            print(f"[dim]Fetching feedback for {len(call_ids)} traces...[/dim]")
+            feedback_list = client.get_feedback(call_ids=call_ids)
+            print(f"[dim]Received {len(feedback_list)} feedback items[/dim]")
+
+            if feedback_list:
+                # Create a mapping of call_id to feedback
+                feedback_by_call = {}
+                for feedback in feedback_list:
+                    weave_ref = feedback.get("weave_ref", "")
+                    # Extract call_id from weave_ref (format: weave:///{entity}/{project}/call/{call_id})
+                    if "/call/" in weave_ref:
+                        call_id = weave_ref.split("/call/")[-1]
+                        if call_id not in feedback_by_call:
+                            feedback_by_call[call_id] = []
+                        feedback_by_call[call_id].append(feedback)
+
+                # Add feedback to each trace
+                traces_with_feedback = 0
+                for trace in result["children"]:
+                    trace_id = trace.get("id")
+                    if trace_id in feedback_by_call:
+                        trace["feedback"] = feedback_by_call[trace_id]
+                        traces_with_feedback += 1
+
+                print(f"[dim]Added feedback to {traces_with_feedback} traces[/dim]")
+    except Exception as e:
+        # If feedback fetching fails, continue without it
+        print(f"[yellow]Warning: Could not fetch feedback: {e}[/yellow]")
+        import traceback
+        traceback.print_exc()
+
     return result
