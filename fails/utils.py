@@ -1,12 +1,21 @@
+import json
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import litellm
 import weave
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from fails.prompts import Category, FinalClassificationResult
+from fails.prompts import (
+    Category, 
+    FinalClassificationResult,
+    DEFAULT_COMPACTION_MODEL,
+    TRACE_COMPACTION_SYSTEM_PROMPT,
+    TRACE_COMPACTION_USER_PROMPT,
+)
 
 
 @weave.op
@@ -104,7 +113,13 @@ def prepare_trace_data_for_pipeline(
     eval_data: Dict[str, Any],
     debug: bool,
     console: Console,
-    n_samples: int | None = None
+    n_samples: int | None = None,
+    deep_trace_analysis: bool = False,
+    nesting_depth: int = 2,
+    max_trace_tokens: int = 2000,
+    wandb_entity: str = "",
+    wandb_project: str = "",
+    compaction_model: str = DEFAULT_COMPACTION_MODEL,
 ) -> List[Dict[str, Any]]:
     """
     Prepare trace data from evaluation data for pipeline processing.
@@ -113,6 +128,13 @@ def prepare_trace_data_for_pipeline(
         eval_data: The evaluation data dictionary
         debug: Whether to display debug information
         console: Rich console for output
+        n_samples: Maximum number of samples to process
+        deep_trace_analysis: Whether to include nested trace execution trees
+        nesting_depth: How deep to traverse when fetching nested traces (1=children, 2=grandchildren, etc.)
+        max_trace_tokens: Token threshold for compaction
+        wandb_entity: Weave entity name (required if deep_trace_analysis=True)
+        wandb_project: Weave project name (required if deep_trace_analysis=True)
+        compaction_model: LLM model to use for trace compaction
         
     Returns:
         List of trace entries formatted for the pipeline
@@ -132,6 +154,10 @@ def prepare_trace_data_for_pipeline(
             console.print(
                 f"[dim]{len(eval_data['children'])} children found, sampling first {n_samples}:[/dim]\n"
             )
+            if deep_trace_analysis:
+                console.print(
+                    f"[dim]Deep trace analysis enabled with nesting_depth={nesting_depth}[/dim]\n"
+                )
         
         for i, trace in enumerate(eval_data["children"]):
             # Format trace entry for pipeline
@@ -141,6 +167,50 @@ def prepare_trace_data_for_pipeline(
                 "output": trace.get("output", {}),
                 "scores": trace.get("output", {}).get("scores", {}) if trace.get("output") else {},
             }
+            
+            # Add execution trace if deep analysis is enabled
+            if deep_trace_analysis:
+                if not wandb_entity or not wandb_project:
+                    console.print("[yellow]Warning: deep_trace_analysis requires wandb_entity and wandb_project[/yellow]")
+                else:
+                    try:
+                        # Fetch nested traces for this child
+                        nested_traces = get_nested_traces_for_child(
+                            child_trace_id=trace["id"],
+                            wandb_entity=wandb_entity,
+                            wandb_project=wandb_project,
+                            max_depth=nesting_depth,
+                        )
+                        
+                        if nested_traces:
+                            # Format as tree
+                            execution_tree = format_trace_as_tree(
+                                root_trace=trace,
+                                all_traces=nested_traces,
+                                max_depth=nesting_depth,
+                                include_inputs=True,
+                                include_outputs=True,
+                            )
+                            
+                            # Compact if too large
+                            execution_tree = compact_execution_trace(
+                                trace_tree=execution_tree,
+                                model=compaction_model,
+                                max_tokens=max_trace_tokens,
+                            )
+                            
+                            trace_entry["execution_trace"] = execution_tree
+                            
+                            if debug and i == 0:
+                                console.print(f"[dim]Execution trace for first child ({len(nested_traces)} nested traces):[/dim]")
+                                console.print(Panel(execution_tree[:2000] + ("..." if len(execution_tree) > 2000 else ""), 
+                                                   title="Execution Trace Preview", border_style="dim"))
+                        else:
+                            trace_entry["execution_trace"] = None
+                            
+                    except Exception as e:
+                        console.print(f"[yellow]Warning: Failed to fetch nested traces for {trace['id']}: {e}[/yellow]")
+                        trace_entry["execution_trace"] = None
             
             trace_data.append(trace_entry)
             
@@ -566,3 +636,272 @@ def generate_evaluation_report(
     report += "[bold bright_magenta]END REPORT[/bold bright_magenta]\n"
 
     return report
+
+
+# =============================================================================
+# Deep Trace Analysis Utilities
+# =============================================================================
+
+def estimate_token_count(text: str) -> int:
+    """
+    Estimate token count using character-based heuristic.
+    
+    Uses rough approximation: 4 characters ≈ 1 token, plus 10% overhead.
+    
+    Args:
+        text: The text to estimate tokens for
+        
+    Returns:
+        Estimated token count
+    """
+    base_estimate = len(text) / 4
+    with_overhead = base_estimate * 1.1
+    return int(with_overhead)
+
+
+def get_op_short_name(op_name: str) -> str:
+    """
+    Extract short name from full op_name like 'weave:///entity/project/op/Name:hash'.
+    
+    Args:
+        op_name: Full Weave op name URI
+        
+    Returns:
+        Short op name (e.g., "NotionRAGAgent.call_model")
+    """
+    if not op_name:
+        return "Unknown"
+    # Extract the op name part before the hash
+    if "/op/" in op_name:
+        name_with_hash = op_name.split("/op/")[-1]
+        return name_with_hash.split(":")[0]
+    return op_name
+
+
+def calculate_duration(trace: Dict[str, Any]) -> str:
+    """
+    Calculate duration string from started_at and ended_at timestamps.
+    
+    Args:
+        trace: Trace dictionary with started_at and ended_at fields
+        
+    Returns:
+        Duration string (e.g., "1.13s" or "497ms")
+    """
+    started = trace.get("started_at")
+    ended = trace.get("ended_at")
+    if not started or not ended:
+        return ""
+    
+    try:
+        # Parse ISO format timestamps
+        start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+        duration_ms = (end_dt - start_dt).total_seconds() * 1000
+        
+        if duration_ms >= 1000:
+            return f"{duration_ms/1000:.2f}s"
+        else:
+            return f"{duration_ms:.0f}ms"
+    except Exception:
+        return ""
+
+
+def _format_value_for_tree(value: Any, indent: str = "", max_length: int = 500) -> str:
+    """
+    Format a value for display in the tree, truncating if necessary.
+    
+    Args:
+        value: The value to format
+        indent: Current indentation string
+        max_length: Maximum length before truncation
+        
+    Returns:
+        Formatted string representation
+    """
+    try:
+        if value is None:
+            return "null"
+        formatted = json.dumps(value, indent=2, default=str)
+        # Add indentation to all lines
+        lines = formatted.split('\n')
+        if len(lines) > 1:
+            formatted = lines[0] + '\n' + '\n'.join(indent + '  ' + line for line in lines[1:])
+        # Truncate if too long
+        if len(formatted) > max_length:
+            formatted = formatted[:max_length] + "... [truncated]"
+        return formatted
+    except Exception:
+        return str(value)[:max_length]
+
+
+def format_trace_as_tree(
+    root_trace: Dict[str, Any],
+    all_traces: List[Dict[str, Any]],
+    max_depth: Optional[int] = None,
+    include_inputs: bool = True,
+    include_outputs: bool = True,
+) -> str:
+    """
+    Format traces as an ASCII tree with full details.
+    
+    Args:
+        root_trace: The root trace to start from
+        all_traces: All descendant traces (flat list)
+        max_depth: Maximum depth to display (None for unlimited)
+        include_inputs: Whether to include input details
+        include_outputs: Whether to include output details
+        
+    Returns:
+        ASCII tree string representation
+    """
+    # Create a map of parent_id -> children
+    children_map: Dict[str, List[Dict[str, Any]]] = {}
+    for trace in all_traces:
+        parent_id = trace.get("parent_id")
+        if parent_id:
+            if parent_id not in children_map:
+                children_map[parent_id] = []
+            children_map[parent_id].append(trace)
+    
+    # Sort children by started_at
+    for parent_id in children_map:
+        children_map[parent_id].sort(key=lambda t: t.get("started_at", ""))
+    
+    lines = []
+    
+    def add_trace_to_tree(trace: Dict[str, Any], prefix: str = "", is_last: bool = True, depth: int = 0):
+        """Recursively add trace and its children to the tree."""
+        if max_depth is not None and depth > max_depth:
+            return
+            
+        # Determine tree characters
+        connector = "└── " if is_last else "├── "
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        
+        # Format trace header
+        op_name = get_op_short_name(trace.get("op_name", ""))
+        duration = calculate_duration(trace)
+        
+        if depth == 0:
+            # Root trace - no connector
+            lines.append(f"{op_name} ({duration})")
+            current_prefix = ""
+        else:
+            lines.append(f"{prefix}{connector}{op_name} ({duration})")
+            current_prefix = child_prefix
+        
+        # Add inputs if present and requested
+        if include_inputs and trace.get("inputs"):
+            inputs_str = _format_value_for_tree(trace["inputs"], current_prefix)
+            lines.append(f"{current_prefix}├── inputs: {inputs_str}")
+        
+        # Add outputs if present and requested
+        if include_outputs and trace.get("output"):
+            output_str = _format_value_for_tree(trace["output"], current_prefix)
+            has_children = trace["id"] in children_map
+            output_connector = "├── " if has_children else "└── "
+            lines.append(f"{current_prefix}{output_connector}output: {output_str}")
+        
+        # Add exception if present
+        if trace.get("exception"):
+            lines.append(f"{current_prefix}└── [ERROR] {trace['exception']}")
+        
+        # Process children
+        children = children_map.get(trace["id"], [])
+        for i, child in enumerate(children):
+            is_last_child = (i == len(children) - 1)
+            add_trace_to_tree(child, current_prefix, is_last_child, depth + 1)
+    
+    add_trace_to_tree(root_trace, depth=0)
+    return "\n".join(lines)
+
+
+def get_nested_traces_for_child(
+    child_trace_id: str,
+    wandb_entity: str,
+    wandb_project: str,
+    max_depth: int = 3,
+    columns: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all nested descendants for a single child trace.
+    
+    Args:
+        child_trace_id: The trace ID to fetch descendants for
+        wandb_entity: Weave entity name
+        wandb_project: Weave project name
+        max_depth: Maximum depth to traverse
+        columns: Columns to retrieve
+        
+    Returns:
+        List of all descendant traces
+    """
+    # Import here to avoid circular imports
+    from fails.weave_query import WeaveQueryConfig, WeaveQueryClient
+    
+    if columns is None:
+        columns = [
+            "id", "parent_id", "trace_id", "op_name", 
+            "started_at", "ended_at", "inputs", "output", "exception"
+        ]
+    
+    config = WeaveQueryConfig(wandb_entity=wandb_entity, wandb_project=wandb_project)
+    client = WeaveQueryClient(config)
+    
+    # Use recursive query
+    result = client.query_descendants_recursive(
+        parent_id=child_trace_id,
+        columns=columns,
+        max_depth=max_depth,
+    )
+    
+    return result.get("traces", [])
+
+
+@weave.op
+def compact_execution_trace(
+    trace_tree: str,
+    model: str = DEFAULT_COMPACTION_MODEL,
+    max_tokens: int = 2000,
+) -> str:
+    """
+    Use LLM to intelligently summarize large execution traces.
+    
+    Preserves key information like tool calls, errors, and decisions
+    while summarizing verbose intermediate outputs.
+    
+    Args:
+        trace_tree: The formatted trace tree string
+        model: LLM model to use for compaction (default from prompts.DEFAULT_COMPACTION_MODEL)
+        max_tokens: Token threshold - if below this, no compaction
+        
+    Returns:
+        Compacted trace tree string (or original if under threshold)
+    """
+    estimated_tokens = estimate_token_count(trace_tree)
+    
+    if estimated_tokens <= max_tokens:
+        return trace_tree  # No compaction needed
+    
+    # Format the user prompt with the trace tree
+    user_prompt = TRACE_COMPACTION_USER_PROMPT.format(trace_tree=trace_tree)
+
+    try:
+        response = litellm.completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": TRACE_COMPACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        # If compaction fails, return truncated original
+        Console().print(f"[yellow]Warning: Trace compaction failed: {e}. Using truncated trace.[/yellow]")
+        # Simple truncation fallback
+        max_chars = max_tokens * 4
+        if len(trace_tree) > max_chars:
+            return trace_tree[:max_chars] + "\n... [trace truncated due to size]"
+        return trace_tree
