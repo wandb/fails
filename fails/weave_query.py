@@ -267,6 +267,7 @@ class WeaveQueryClient:
 
         return self._execute_query(query)
 
+    @weave.op
     def query_evaluation_children(
         self,
         evaluation_call_id: str,
@@ -536,6 +537,7 @@ class WeaveQueryClient:
         weave_filters: Dict[str, Any],
         columns: Optional[List[str]] = None,
         limit: int | None = None,
+        trace_roots_only: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Query traces directly using Weave UI filters (from trace URL).
@@ -554,6 +556,8 @@ class WeaveQueryClient:
             weave_filters: Filter object from Weave UI (from trace URL)
             columns: Columns to retrieve
             limit: Maximum number of results
+            trace_roots_only: If True, only return root traces (parent_id is null).
+                              Default is True to match Weave UI behavior.
 
         Returns:
             List of trace dictionaries matching the filters
@@ -584,8 +588,18 @@ class WeaveQueryClient:
 
         # Convert Weave UI filters to API filter format
         filter_items = weave_filters.get("items", [])
+        expr_conditions = []
+        
+        # Add root traces filter if requested (parent_id is null)
+        if trace_roots_only:
+            expr_conditions.append({
+                "$eq": [
+                    {"$getField": "parent_id"},
+                    {"$literal": None}
+                ]
+            })
+
         if filter_items:
-            expr_conditions = []
 
             for item in filter_items:
                 field = item.get("field")
@@ -696,19 +710,21 @@ class WeaveQueryClient:
                         ]
                     })
 
-            # Combine conditions based on logic operator
-            logic_op = weave_filters.get("logicOperator", "and")
-            if expr_conditions:
-                if logic_op == "or":
-                    query["query"] = {"$expr": {"$or": expr_conditions}}
-                else:  # default to "and"
-                    query["query"] = {"$expr": {"$and": expr_conditions}}
+        # Combine conditions based on logic operator
+        logic_op = weave_filters.get("logicOperator", "and")
+        if expr_conditions:
+            if logic_op == "or" and not trace_roots_only:
+                # Only use OR if there are no mandatory conditions (like roots filter)
+                query["query"] = {"$expr": {"$or": expr_conditions}}
+            else:  # default to "and"
+                query["query"] = {"$expr": {"$and": expr_conditions}}
 
         if limit is not None:
             query["limit"] = limit
 
         return self._execute_query(query)
 
+    @weave.op
     def query_descendants_recursive(
         self,
         parent_id: str,

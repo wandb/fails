@@ -266,7 +266,7 @@ class Args:
     deep_trace_analysis: bool = False  # Enable deep trace analysis for agentic workflows
     nesting_depth: int = 2  # How deep to traverse (1=children, 2=grandchildren...)
     max_trace_tokens: int = 10000  # Token threshold before LLM compaction
-    compaction_model: str = "gpt-4o-mini"  # Model for trace compaction
+    compaction_model: str = "gemini/gemini-2.5-flash-lite"  # Model for trace compaction
 
 
 @weave.op
@@ -1494,14 +1494,13 @@ async def run_extract_and_classify_pipeline(
     config_file_path: str,
     wandb_entity: str,
     wandb_project: str,
+    nesting_depth: int,
+    max_trace_tokens: int,
+    compaction_model: str,    
     force_eval_select: bool = False,
     n_samples: int | None = None,
     trace_filters: Dict[str, Any] | None = None,
-    # Deep trace analysis params
     deep_trace_analysis: bool = False,
-    nesting_depth: int = 2,
-    max_trace_tokens: int = 10000,
-    compaction_model: str = "gpt-4o-mini",
 ) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
