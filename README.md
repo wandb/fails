@@ -59,6 +59,12 @@ uv run fails/pipeline.py --model "gemini/gemini-2.5-pro"
 
 # Limit samples and concurrency
 uv run fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
+
+# Deep trace analysis for agentic workflows (analyzes tool calls, LLM reasoning, execution flow)
+uv run fails/pipeline.py --deep_trace_analysis
+
+# Customize deep trace analysis
+uv run fails/pipeline.py --deep_trace_analysis --nesting_depth 3 --max_trace_tokens 5000 --compaction_model gpt-4o
 ```
 
 ### Optional: Pipeline Configuration
@@ -78,6 +84,21 @@ MAX_CONCURRENT_LLM_CALLS=5           # Max concurrent LLM API calls (default: 20
 ```
 
 **Note:** Environment variables are overridden by CLI arguments if both are provided.
+
+### Deep Trace Analysis (for Agentic Workflows)
+
+When analyzing agent-based systems, you can enable **deep trace analysis** to examine the full execution tree—including tool calls, LLM reasoning steps, and intermediate outputs—rather than just the top-level inputs/outputs.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--deep_trace_analysis` | `False` | Enable deep trace analysis |
+| `--nesting_depth` | `2` | How deep to traverse (1=children, 2=grandchildren, etc.) |
+| `--max_trace_tokens` | `10000` | Token threshold before LLM compaction kicks in |
+| `--compaction_model` | `gpt-4o-mini` | Model used to summarize large traces |
+
+This helps identify failure patterns like:
+- **Tool Use Failures**: Wrong tool selection, bad parameters, ignored outputs
+- **Planning Failures**: Loops, poor ordering, abandoned plans
 
 ## Run the pipeline eval [W&B internal only]
 

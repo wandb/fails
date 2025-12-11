@@ -7,7 +7,7 @@ Uses prompt_toolkit for robust paste handling and clean UI.
 import json
 import re
 from typing import Optional
-from urllib.parse import unquote
+from urllib.parse import unquote_plus
 from prompt_toolkit import Application
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
@@ -69,7 +69,7 @@ class EvaluationSelector:
 
             # URL-decode and parse the filters JSON
             try:
-                filters_json = unquote(filters_encoded)
+                filters_json = unquote_plus(filters_encoded)
                 filters = json.loads(filters_json)
                 return (entity, project, None, filters)
             except (json.JSONDecodeError, Exception) as e:

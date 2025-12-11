@@ -1,12 +1,25 @@
+import concurrent.futures
+import json
+import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+import litellm
 import weave
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from fails.prompts import Category, FinalClassificationResult
+from fails.prompts import (
+    Category,
+    FinalClassificationResult,
+    TRACE_COMPACTION_SYSTEM_PROMPT,
+    TRACE_COMPACTION_USER_PROMPT,
+)
+
+# Avoid circular import - WeaveQueryClient/Config are only needed at runtime in one function
+if TYPE_CHECKING:
+    from fails.weave_query import WeaveQueryClient, WeaveQueryConfig
 
 
 @weave.op
@@ -169,8 +182,9 @@ def extract_metadata(trace: Dict[str, Any], selected_columns: List[str]) -> Dict
     metadata = {}
 
     # Extract scores if they exist (evaluation-style traces)
-    if trace.get("output", {}).get("scores"):
-        metadata["scores"] = trace["output"]["scores"]
+    output = trace.get("output")
+    if isinstance(output, dict) and output.get("scores"):
+        metadata["scores"] = output["scores"]
 
     # Extract timestamps
     if trace.get("started_at"):
@@ -210,7 +224,14 @@ def prepare_trace_data_for_pipeline(
     debug: bool,
     console: Console,
     n_samples: int | None = None,
-    selected_columns: List[str] | None = None
+    selected_columns: List[str] | None = None,
+    # Deep trace analysis params
+    deep_trace_analysis: bool = False,
+    nesting_depth: int = 2,
+    max_trace_tokens: int = 10000,
+    compaction_model: str = "gpt-4o-mini",
+    wandb_entity: str = "",
+    wandb_project: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Prepare trace data for pipeline processing.
@@ -221,6 +242,12 @@ def prepare_trace_data_for_pipeline(
         console: Rich console for output
         n_samples: Optional limit on number of samples
         selected_columns: List of column paths to extract as metadata
+        deep_trace_analysis: Whether to fetch and include nested execution traces
+        nesting_depth: How deep to traverse when fetching nested traces
+        max_trace_tokens: Token threshold before triggering compaction
+        compaction_model: LLM model for trace compaction
+        wandb_entity: W&B entity (required for deep_trace_analysis)
+        wandb_project: W&B project (required for deep_trace_analysis)
 
     Returns:
         Tuple of (trace_data, annotation_summary) where:
@@ -258,6 +285,7 @@ def prepare_trace_data_for_pipeline(
                 "output": trace.get("output", {}),
                 "metadata": metadata,
                 "annotations": annotations,
+                "execution_trace": None,  # Default to None, filled later if deep analysis enabled
             }
 
             trace_data.append(trace_entry)
@@ -283,9 +311,108 @@ def prepare_trace_data_for_pipeline(
                     console.print(f"[dim]  Available trace keys: {list(trace.keys())[:10]}[/dim]")
                     if "attributes" in trace:
                         console.print(f"[dim]  attributes keys: {list(trace.get('attributes', {}).keys())}[/dim]")
+
+        # Process deep trace analysis in parallel if enabled
+        if deep_trace_analysis:
+            if not wandb_entity or not wandb_project:
+                console.print("[yellow]Warning: deep_trace_analysis requires wandb_entity and wandb_project[/yellow]")
+            else:
+                if debug:
+                    console.print(f"[dim]Starting parallel deep trace analysis for {len(trace_data)} traces...[/dim]")
+                
+                # Import here to avoid circular import
+                from fails.weave_query import WeaveQueryClient, WeaveQueryConfig
+                
+                # Initialize Weave client
+                weave_config = WeaveQueryConfig(
+                    wandb_entity=wandb_entity,
+                    wandb_project=wandb_project,
+                    api_key=os.environ.get("WANDB_API_KEY")
+                )
+                weave_client = WeaveQueryClient(weave_config)
+                
+                def process_single_trace(trace_entry: Dict[str, Any]) -> str | None:
+                    try:
+                        trace_id = trace_entry["id"]
+                        
+                        # Fetch descendants using Weave client
+                        descendants_result = weave_client.query_descendants_recursive(
+                            parent_id=trace_id,
+                            max_depth=nesting_depth,
+                            columns=[
+                                "id", "parent_id", "trace_id", "op_name",
+                                "started_at", "ended_at", "inputs", "output", "exception"
+                            ]
+                        )
+                        
+                        all_traces = descendants_result["traces"]
+                        if not all_traces:
+                            return None
+                            
+                        # Find root trace in the fetched traces or use entry
+                        root_trace = next((t for t in all_traces if t["id"] == trace_id), None)
+                        if not root_trace:
+                            # Reconstruct root from trace_entry if not found (shouldn't happen usually)
+                            root_trace = {
+                                "id": trace_entry["id"],
+                                "op_name": "Root", # Placeholder if needed
+                                "inputs": trace_entry["inputs"],
+                                "output": trace_entry["output"],
+                            }
+                            all_traces.append(root_trace)
+
+                        # Format as tree
+                        execution_tree = format_trace_as_tree(
+                            root_trace=root_trace,
+                            all_traces=all_traces,
+                            max_depth=nesting_depth,
+                            include_inputs=True,
+                            include_outputs=True,
+                        )
+                        
+                        # Compact if too large
+                        execution_tree = compact_execution_trace(
+                            trace_tree=execution_tree,
+                            model=compaction_model,
+                            max_tokens=max_trace_tokens,
+                        )
+                        
+                        return execution_tree
+                        
+                    except Exception as e:
+                        # Return None on failure so pipeline can continue
+                        return None
+
+                # Run in parallel using ThreadPoolExecutor
+                # We use threads because fetch is I/O bound and compact is I/O bound (network call to LLM)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    # Submit all tasks
+                    future_to_entry = {
+                        executor.submit(process_single_trace, entry): entry 
+                        for entry in trace_data
+                    }
+                    
+                    # Process results as they complete
+                    for future in concurrent.futures.as_completed(future_to_entry):
+                        entry = future_to_entry[future]
+                        try:
+                            execution_trace = future.result()
+                            entry["execution_trace"] = execution_trace
+                        except Exception as e:
+                            entry["execution_trace"] = None
+                            if debug:
+                                console.print(f"[yellow]Error processing trace {entry['id']}: {e}[/yellow]")
+
+                if debug:
+                    # Show preview of first trace's execution trace
+                    if trace_data and trace_data[0].get("execution_trace"):
+                        preview = trace_data[0]["execution_trace"][:1500] + ("..." if len(trace_data[0]["execution_trace"]) > 1500 else "")
+                        console.print(f"\n[dim]Execution trace for first trace:[/dim]")
+                        console.print(Panel(preview, title="Execution Trace Preview", border_style="dim"))
     else:
         console.print("[red]No children found in eval_data[/red]")
         raise ValueError("No children found in eval_data")
+
 
     annotation_summary = {
         "has_annotations": len(annotation_examples) > 0,
@@ -718,3 +845,298 @@ def generate_evaluation_report(
     report += "[bold bright_magenta]END REPORT[/bold bright_magenta]\n"
 
     return report
+
+
+# =============================================================================
+# Deep Trace Analysis Utilities
+# =============================================================================
+
+def estimate_token_count(text: str) -> int:
+    """
+    Quick heuristic for token estimation (~4 chars per token).
+    
+    Args:
+        text: The text to estimate tokens for
+        
+    Returns:
+        Estimated token count
+    """
+    return len(text) // 4
+
+
+def get_op_short_name(op_name: str) -> str:
+    """
+    Extract a clean operation name from the full Weave op_name.
+    
+    Args:
+        op_name: Full Weave op_name (e.g., "weave:///entity/project/op/MyAgent.call:abc123")
+        
+    Returns:
+        Short name (e.g., "MyAgent.call")
+    """
+    if not op_name:
+        return "Unknown"
+    
+    # Extract from weave:///entity/project/op/NAME:hash format
+    if "/op/" in op_name:
+        name = op_name.split("/op/")[-1]
+        # Remove the hash suffix if present
+        if ":" in name:
+            name = name.split(":")[0]
+        return name
+    
+    return op_name
+
+
+def calculate_duration(trace: Dict[str, Any]) -> str:
+    """
+    Calculate and format the duration of a trace.
+    
+    Args:
+        trace: Trace dictionary with started_at and ended_at fields
+        
+    Returns:
+        Formatted duration string (e.g., "1.23s", "456ms")
+    """
+    started = trace.get("started_at")
+    ended = trace.get("ended_at")
+    
+    if not started or not ended:
+        return ""
+    
+    try:
+        # Parse ISO format timestamps
+        if isinstance(started, str):
+            start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        else:
+            start_dt = started
+            
+        if isinstance(ended, str):
+            end_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+        else:
+            end_dt = ended
+        
+        duration_ms = (end_dt - start_dt).total_seconds() * 1000
+        
+        if duration_ms >= 1000:
+            return f"{duration_ms / 1000:.2f}s"
+        else:
+            return f"{duration_ms:.0f}ms"
+    except Exception:
+        return ""
+
+
+def _format_value_for_tree(value: Any, indent: str = "", max_length: int = 200) -> str:
+    """
+    Format a value for display in the trace tree.
+    
+    Args:
+        value: The value to format
+        indent: Current indentation
+        max_length: Maximum length before truncation
+        
+    Returns:
+        Formatted string representation
+    """
+    if value is None:
+        return "null"
+    
+    if isinstance(value, str):
+        if len(value) > max_length:
+            return f'"{value[:max_length]}..."'
+        return f'"{value}"'
+    
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        # Format as compact JSON
+        try:
+            formatted = json.dumps(value, indent=2, default=str)
+            if len(formatted) > max_length:
+                # Show keys only for large dicts
+                keys = list(value.keys())[:5]
+                suffix = f", ... ({len(value)} keys)" if len(value) > 5 else ""
+                return "{" + ", ".join(f'"{k}": ...' for k in keys) + suffix + "}"
+            return formatted
+        except Exception:
+            return str(value)[:max_length]
+    
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if len(value) > 3:
+            return f"[{len(value)} items]"
+        try:
+            formatted = json.dumps(value, default=str)
+            if len(formatted) > max_length:
+                return f"[{len(value)} items]"
+            return formatted
+        except Exception:
+            return f"[{len(value)} items]"
+    
+    return str(value)[:max_length]
+
+
+@weave.op
+def format_trace_as_tree(
+    root_trace: Dict[str, Any],
+    all_traces: List[Dict[str, Any]],
+    max_depth: Optional[int] = None,
+    include_inputs: bool = True,
+    include_outputs: bool = True,
+) -> str:
+    """
+    Format a list of traces as an ASCII tree structure.
+    
+    Args:
+        root_trace: The root trace to start from
+        all_traces: All traces (including root and descendants)
+        max_depth: Maximum depth to display (None for unlimited)
+        include_inputs: Whether to include input details
+        include_outputs: Whether to include output details
+        
+    Returns:
+        ASCII tree representation of the trace hierarchy
+    """
+    # Build parent->children mapping
+    children_map: Dict[str, List[Dict[str, Any]]] = {}
+    trace_by_id: Dict[str, Dict[str, Any]] = {}
+    
+    for trace in all_traces:
+        trace_id = trace.get("id")
+        parent_id = trace.get("parent_id")
+        
+        if trace_id:
+            trace_by_id[trace_id] = trace
+            
+        if parent_id:
+            if parent_id not in children_map:
+                children_map[parent_id] = []
+            children_map[parent_id].append(trace)
+    
+    # Sort children by started_at
+    for parent_id in children_map:
+        children_map[parent_id].sort(
+            key=lambda t: t.get("started_at", ""),
+        )
+    
+    lines: List[str] = []
+    
+    def add_trace_to_tree(trace: Dict[str, Any], prefix: str = "", is_last: bool = True, depth: int = 0):
+        if max_depth is not None and depth > max_depth:
+            return
+        
+        trace_id = trace.get("id", "")
+        op_name = get_op_short_name(trace.get("op_name", ""))
+        duration = calculate_duration(trace)
+        
+        # Build the main line
+        connector = "└── " if is_last else "├── "
+        duration_str = f" ({duration})" if duration else ""
+        lines.append(f"{prefix}{connector}{op_name}{duration_str}")
+        
+        # Prepare prefix for children
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        
+        # Add inputs if requested
+        if include_inputs and trace.get("inputs"):
+            inputs = trace.get("inputs", {})
+            if inputs:
+                formatted_inputs = _format_value_for_tree(inputs, child_prefix)
+                if "\n" in formatted_inputs:
+                    lines.append(f"{child_prefix}├── inputs:")
+                    for input_line in formatted_inputs.split("\n")[:5]:  # Limit lines
+                        lines.append(f"{child_prefix}│   {input_line}")
+                else:
+                    lines.append(f"{child_prefix}├── inputs: {formatted_inputs}")
+        
+        # Add outputs if requested
+        if include_outputs and trace.get("output"):
+            output = trace.get("output")
+            if output:
+                formatted_output = _format_value_for_tree(output, child_prefix)
+                if "\n" in formatted_output:
+                    lines.append(f"{child_prefix}├── output:")
+                    for output_line in formatted_output.split("\n")[:5]:  # Limit lines
+                        lines.append(f"{child_prefix}│   {output_line}")
+                else:
+                    lines.append(f"{child_prefix}├── output: {formatted_output}")
+        
+        # Add exception if present
+        if trace.get("exception"):
+            lines.append(f"{child_prefix}├── [ERROR] {trace.get('exception')[:200]}")
+        
+        # Recurse into children
+        children = children_map.get(trace_id, [])
+        for i, child in enumerate(children):
+            is_last_child = (i == len(children) - 1)
+            add_trace_to_tree(child, child_prefix, is_last_child, depth + 1)
+    
+    # Start with root trace header
+    root_op = get_op_short_name(root_trace.get("op_name", ""))
+    root_duration = calculate_duration(root_trace)
+    duration_str = f" ({root_duration})" if root_duration else ""
+    lines.append(f"{root_op}{duration_str}")
+    
+    # Add root's children
+    root_id = root_trace.get("id", "")
+    children = children_map.get(root_id, [])
+    for i, child in enumerate(children):
+        is_last_child = (i == len(children) - 1)
+        add_trace_to_tree(child, "", is_last_child, 1)
+    
+    return "\n".join(lines)
+
+
+@weave.op
+def compact_execution_trace(
+    trace_tree: str,
+    model: str = "gpt-4o-mini",
+    max_tokens: int = 10000,
+) -> str:
+    """
+    Compact an execution trace using an LLM if it exceeds the token threshold.
+    
+    Args:
+        trace_tree: The formatted trace tree string
+        model: LLM model to use for compaction
+        max_tokens: Token threshold - if exceeded, compaction is triggered
+        
+    Returns:
+        Original trace if under threshold, or compacted version
+    """
+    estimated_tokens = estimate_token_count(trace_tree)
+    
+    if estimated_tokens <= max_tokens:
+        return trace_tree
+    
+    # Calculate target tokens for compaction (aim for 70% of max)
+    target_tokens = int(max_tokens * 0.7)
+    
+    try:
+        response = litellm.completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": TRACE_COMPACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": TRACE_COMPACTION_USER_PROMPT.format(
+                    target_tokens=target_tokens,
+                    trace_tree=trace_tree
+                )},
+            ],
+            temperature=0.0,
+        )
+        
+        compacted = response.choices[0].message.content
+        return compacted if compacted else trace_tree
+        
+    except Exception as e:
+        # If compaction fails, return truncated original
+        print(f"[yellow]Warning: Trace compaction failed: {e}. Using truncated trace.[/yellow]")
+        # Simple truncation fallback
+        max_chars = max_tokens * 4
+        if len(trace_tree) > max_chars:
+            return trace_tree[:max_chars] + "\n... [truncated]"
+        return trace_tree

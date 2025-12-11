@@ -103,7 +103,7 @@ you better understand what the user is trying to achieve with their AI system.
 <trace_metadata>
 {trace_metadata}
 </trace_metadata>
-
+{execution_trace_section}
 ## Analyze and Draft Notes and Candidate Pattern Categories
 
 With the above user context and trace data, please output a draft set of notes and candidate \
@@ -279,7 +279,7 @@ classify this specific trace into the most appropriate category.
 <trace_metadata>
 {trace_metadata}
 </trace_metadata>
-
+{execution_trace_section}
 ## Available Pattern Categories
 
 <available_pattern_categories>
@@ -322,3 +322,49 @@ class PipelineResult(BaseModel):
     pattern_categories: List[Category]
     classifications: List[FinalClassificationResult]
     report: str = ""
+
+
+# =============================================================================
+# Deep Trace Analysis Prompts
+# =============================================================================
+
+# Execution trace section - conditionally included when deep_trace_analysis=True
+EXECUTION_TRACE_SECTION = """
+### Agent Execution Trace
+
+The trace below shows the internal execution flow including tool calls, LLM operations, and timings.
+
+Look for these failure patterns:
+- **Tool Use**: Wrong tool, bad parameters, ignored outputs, redundant calls
+- **Planning**: Loops, poor ordering, abandoned plans
+
+<agent_execution_trace>
+{execution_trace}
+</agent_execution_trace>
+"""
+
+# Trace compaction prompts
+TRACE_COMPACTION_SYSTEM_PROMPT = """You are compacting an agent execution trace for failure analysis.
+
+Your task is to summarize this execution trace concisely while preserving critical information.
+
+PRESERVE (keep exactly as-is or with minimal reduction):
+- All tool call names and their key input parameters
+- Errors, exceptions, or failure indicators
+- Key decision points and reasoning from LLM calls
+- Final outputs and results
+- The hierarchical structure of the trace
+
+SUMMARIZE/TRUNCATE:
+- Verbose intermediate LLM outputs (keep just key decisions)
+- Large data payloads in outputs (summarize what type of data)
+- Redundant or repetitive information
+- Long lists or arrays (indicate count and type)
+
+Output a condensed version of the trace that maintains the tree structure but is more compact."""
+
+TRACE_COMPACTION_USER_PROMPT = """Compact this agent execution trace to approximately {target_tokens} tokens:
+
+{trace_tree}
+
+Output the compacted trace maintaining the tree structure."""
