@@ -64,7 +64,7 @@ uv run fails/pipeline.py --n-samples 10 --max-concurrent-llm-calls 5
 uv run fails/pipeline.py --deep_trace_analysis
 
 # Customize deep trace analysis
-uv run fails/pipeline.py --deep_trace_analysis --nesting_depth 3 --max_trace_tokens 5000 --compaction_model gpt-4o
+uv run fails/pipeline.py --deep_trace_analysis --nesting_depth 3 --max_trace_tokens 50000
 ```
 
 ### Optional: Pipeline Configuration
@@ -94,7 +94,7 @@ When analyzing agent-based systems, you can enable **deep trace analysis** to ex
 | `--deep_trace_analysis` | `False` | Enable deep trace analysis |
 | `--nesting_depth` | `2` | How deep to traverse (1=children, 2=grandchildren, etc.) |
 | `--max_trace_tokens` | `10000` | Token threshold before LLM compaction kicks in |
-| `--compaction_model` | `gpt-4o-mini` | Model used to summarize large traces |
+| `--compaction_model` | `gemini/gemini-2.5-flash-lite` | Model used to summarize large traces |
 
 This helps identify failure patterns like:
 - **Tool Use Failures**: Wrong tool selection, bad parameters, ignored outputs
