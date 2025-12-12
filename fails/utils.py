@@ -224,12 +224,12 @@ def prepare_trace_data_for_pipeline(
     eval_data: Dict[str, Any],
     debug: bool,
     console: Console,
-    n_samples: int | None = None,
-    selected_columns: List[str] | None = None,
     deep_trace_analysis: bool,
     compaction_model: str,
     nesting_depth: int,
     max_trace_tokens: int,
+    n_samples: int | None = None,
+    selected_columns: List[str] | None = None,
     wandb_entity: str = "",
     wandb_project: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -934,19 +934,140 @@ def calculate_duration(trace: Dict[str, Any]) -> str:
         return ""
 
 
-def _format_value_for_tree(value: Any, indent: str = "") -> str:
+def _clean_value_for_tree(value: Any, seen_tools: set = None, seen_system_prompt: list = None) -> Any:
+    """
+    Clean a value before formatting for the trace tree.
+    Removes noise and deduplicates repeated content.
+    
+    Args:
+        value: The value to clean
+        seen_tools: Set to track if we've seen tool definitions (pass same set across calls)
+        seen_system_prompt: List to track if we've seen system prompt (pass same list across calls)
+        
+    Returns:
+        Cleaned value
+    """
+    if seen_tools is None:
+        seen_tools = set()
+    if seen_system_prompt is None:
+        seen_system_prompt = []
+    
+    if value is None:
+        return None
+    
+    if isinstance(value, str):
+        # Shorten weave URIs
+        if value.startswith("weave:///"):
+            # Extract just the object/op name
+            # weave:///entity/project/object/Name:hash -> Name
+            parts = value.split("/")
+            if len(parts) >= 5:
+                name_part = parts[-1].split(":")[0]
+                return f"[{name_part}]"
+        return value
+    
+    if isinstance(value, (int, float, bool)):
+        return value
+    
+    if isinstance(value, dict):
+        cleaned = {}
+        for k, v in value.items():
+            # Skip Weave internal metadata
+            if k in ("_type", "_class_name", "_bases"):
+                continue
+            # Skip assistant_message if we have tool_calls (redundant)
+            if k == "assistant_message" and "tool_calls" in value:
+                continue
+            cleaned[k] = _clean_value_for_tree(v, seen_tools, seen_system_prompt)
+        return cleaned
+    
+    if isinstance(value, list):
+        # Check if this is a tools array (tool definitions)
+        if value and isinstance(value[0], dict) and value[0].get("type") == "function":
+            tool_count = len(value)
+            tool_sig = f"tools_{tool_count}"
+            if tool_sig in seen_tools:
+                return f"[{tool_count} tools - same as above]"
+            seen_tools.add(tool_sig)
+            # Return simplified tool list
+            return [{"tool": t.get("function", {}).get("name", "unknown")} for t in value]
+        
+        # Check if this is a messages array
+        if value and isinstance(value[0], dict) and value[0].get("role"):
+            cleaned_messages = []
+            for msg in value:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                
+                # Deduplicate system prompts (same prompt repeats in every LLM call)
+                # Keep FIRST one in full (tells us what agent should do)
+                # Dedupe subsequent ones (they're identical)
+                if role == "system":
+                    if seen_system_prompt:
+                        cleaned_messages.append({"role": "system", "content": "[system prompt - same as root]"})
+                        continue
+                    seen_system_prompt.append(True)
+                    # Keep full system prompt - it defines expected behavior!
+                
+                # For assistant messages with tool calls, show the calls clearly
+                if role == "assistant" and msg.get("tool_calls"):
+                    tool_calls_info = []
+                    for tc in msg.get("tool_calls", []):
+                        func = tc.get("function", {})
+                        tool_calls_info.append({
+                            "name": func.get("name", "?"),
+                            "args": func.get("arguments", "")  # Keep args - important for analysis!
+                        })
+                    cleaned_messages.append({
+                        "role": "assistant",
+                        "tool_calls": tool_calls_info
+                    })
+                    continue
+                
+                # For tool results - KEEP FULL CONTENT (critical for failure analysis!)
+                # Errors, unexpected results, etc. are exactly what we need to see
+                if role == "tool":
+                    cleaned_messages.append({
+                        "role": "tool",
+                        "name": msg.get("name", ""),
+                        "content": content  # Don't truncate - this is where failures show!
+                    })
+                    continue
+                
+                # User messages - can truncate, initial query is less critical
+                cleaned_messages.append({
+                    "role": role,
+                    "content": content[:2000] + "..." if len(content) > 2000 else content
+                })
+            
+            # Keep full message history - let compaction handle if too large
+            return cleaned_messages
+        
+        # Regular list
+        return [_clean_value_for_tree(item, seen_tools, seen_system_prompt) for item in value]
+    
+    return value
+
+
+def _format_value_for_tree(value: Any, indent: str = "", clean: bool = True, 
+                           seen_tools: set = None, seen_system_prompt: list = None) -> str:
     """
     Format a value for display in the trace tree.
-    
-    No truncation - compaction handles size limits.
     
     Args:
         value: The value to format
         indent: Current indentation
+        clean: Whether to clean the value first (remove noise)
+        seen_tools: Set to track tool definitions seen
+        seen_system_prompt: List to track system prompts seen
         
     Returns:
         Formatted string representation
     """
+    # Clean the value first to remove noise
+    if clean:
+        value = _clean_value_for_tree(value, seen_tools, seen_system_prompt)
+    
     if value is None:
         return "null"
     
@@ -986,6 +1107,12 @@ def format_trace_as_tree(
     """
     Format a list of traces as an ASCII tree structure.
     
+    Automatically cleans traces to remove noise:
+    - Weave internal metadata (_type, _class_name, _bases)
+    - Long weave:/// URIs shortened to object names
+    - Repeated tool definitions deduplicated
+    - Repeated system prompts deduplicated
+    
     Args:
         root_trace: The root trace to start from
         all_traces: All traces (including root and descendants)
@@ -1020,6 +1147,10 @@ def format_trace_as_tree(
     
     lines: List[str] = []
     
+    # Shared state for deduplication across the entire tree
+    seen_tools: set = set()
+    seen_system_prompt: list = []
+    
     def add_trace_to_tree(trace: Dict[str, Any], prefix: str = "", is_last: bool = True, depth: int = 0):
         if max_depth is not None and depth > max_depth:
             return
@@ -1040,7 +1171,10 @@ def format_trace_as_tree(
         if include_inputs and trace.get("inputs"):
             inputs = trace.get("inputs", {})
             if inputs:
-                formatted_inputs = _format_value_for_tree(inputs, child_prefix)
+                formatted_inputs = _format_value_for_tree(
+                    inputs, child_prefix, clean=True, 
+                    seen_tools=seen_tools, seen_system_prompt=seen_system_prompt
+                )
                 if "\n" in formatted_inputs:
                     lines.append(f"{child_prefix}├── inputs:")
                     for input_line in formatted_inputs.split("\n"):
@@ -1052,7 +1186,10 @@ def format_trace_as_tree(
         if include_outputs and trace.get("output"):
             output = trace.get("output")
             if output:
-                formatted_output = _format_value_for_tree(output, child_prefix)
+                formatted_output = _format_value_for_tree(
+                    output, child_prefix, clean=True,
+                    seen_tools=seen_tools, seen_system_prompt=seen_system_prompt
+                )
                 if "\n" in formatted_output:
                     lines.append(f"{child_prefix}├── output:")
                     for output_line in formatted_output.split("\n"):
