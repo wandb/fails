@@ -1,0 +1,737 @@
+manifest:
+  version: "0.1.2"
+  schema: https://a2as.org/cert/schema
+  subject:
+    name: wandb/fails
+    source: https://github.com/wandb/fails
+    branch: main
+    commit: "159eea34"
+    scope: [fails/cli/header.py, fails/cli/context_collector.py, fails/utils.py, fails/prompts.py, fails/weave_query.py, fails/spinner.py,
+      fails/cli/config_selector.py, fails/pipeline.py, fails/cli/column_context_selector.py, fails/cli/failure_selector.py,
+      fails/cli/evaluation_selector.py]
+  issued:
+    by: A2AS.org
+    at: '2026-01-26T16:11:14Z'
+  signatures:
+    digest: sha256:YGg_uENyVr5TlwWC1BV-gw3nEMGCe0S5OsmRtdZzCsE
+    key: ed25519:g0Nj8efkyhCeFpaRX6re3OOqV8kyRLb5W5l8DRQIRcw
+    sig: ed25519:ithfj2unEOLigv5abX58cQU_PZ26jmdgGswkMXJ3pNpHBrXS7W2RvGLzFh2-KGBjG0nlZbdLchZG6jnAicHoCw
+
+agents:
+  draft_categorization_llm:
+    type: instance
+    models: [LitellmModel]
+    params:
+      function: draft_categorization
+      name: Row by Row
+      output_type: FirstPassCategorization
+      instructions: [FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT]
+  final_classification_llm:
+    type: instance
+    models: [LitellmModel]
+    params:
+      function: final_classification
+      name: Final Classification
+      output_type: FinalClassification
+      instructions: ['# Task - Final Classification of Evaluation Failures', You are a helpful assistant that classifies evaluation
+          failures into predefined categories., Your task is to analyze a single evaluation failure and classify it into one
+          of the provided task failure categories., '## Important Notes:', '- You must select exactly ONE category from the
+          provided list', '- If the failure doesn''t clearly fit into any of the predefined categories, classify it as "other"',
+        '- Base your classification on the actual failure data, not on assumptions', '- Consider the user context to better
+          understand the nature of the failure']
+  review_categorizations_llm:
+    type: instance
+    models: [LitellmModel]
+    params:
+      function: aggregate_categorizations
+      name: Review Agent
+      output_type: ClusteringCategories
+      instructions: [clustering_system_prompt_str]
+
+models:
+  LitellmModel:
+    type: function
+    agents: [draft_categorization_llm, final_classification_llm, review_categorizations_llm]
+
+imports:
+  Agent: agents.Agent
+  Any: typing.Any
+  Application: prompt_toolkit.Application
+  asyncio: asyncio
+  base64: base64
+  BaseModel: pydantic.BaseModel
+  Category: fails.prompts.Category
+  CLUSTERING_PROMPT: fails.prompts.CLUSTERING_PROMPT
+  CLUSTERING_SYSTEM_PROMPT: fails.prompts.CLUSTERING_SYSTEM_PROMPT
+  ClusteringCategories: fails.prompts.ClusteringCategories
+  collect_user_context: fails.cli.context_collector.collect_user_context
+  Condition: prompt_toolkit.filters.Condition
+  ConditionalContainer: prompt_toolkit.layout.containers.ConditionalContainer
+  ConnectionError: requests.exceptions.ConnectionError
+  Console: rich.console.Console
+  copy: copy
+  dataclass: dataclasses.dataclass
+  datetime: datetime.datetime
+  Dict: typing.Dict
+  display_evaluation_summary: fails.utils.display_evaluation_summary
+  Enum: enum.Enum
+  FailsSpinner: fails.spinner.FailsSpinner
+  FailureColumnSelector: fails.cli.failure_selector.FailureColumnSelector
+  Field: pydantic.Field
+  filter_evaluation_data_columns: fails.weave_query.filter_evaluation_data_columns
+  filter_trace_data_by_columns: fails.utils.filter_trace_data_by_columns
+  FINAL_CLASSIFICATION_PROMPT: fails.prompts.FINAL_CLASSIFICATION_PROMPT
+  FINAL_CLASSIFICATION_SYSTEM_PROMPT: fails.prompts.FINAL_CLASSIFICATION_SYSTEM_PROMPT
+  FinalClassification: fails.prompts.FinalClassification
+  FinalClassificationResult: fails.prompts.FinalClassificationResult
+  FIRST_PASS_CATEGORIZATION_PROMPT: fails.prompts.FIRST_PASS_CATEGORIZATION_PROMPT
+  FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT: fails.prompts.FIRST_PASS_CATEGORIZATION_SYSTEM_PROMPT
+  FirstPassCategorization: fails.prompts.FirstPassCategorization
+  FirstPassCategorizationResult: fails.prompts.FirstPassCategorizationResult
+  FormattedText: prompt_toolkit.formatted_text.FormattedText
+  FormattedTextControl: prompt_toolkit.layout.controls.FormattedTextControl
+  Frame: prompt_toolkit.widgets.Frame
+  generate_evaluation_report: fails.utils.generate_evaluation_report
+  generate_evaluation_report_markdown: fails.utils.generate_evaluation_report_markdown
+  get_available_columns: fails.weave_query.get_available_columns
+  get_fails_header_for_prompt_toolkit: fails.cli.header.get_fails_header_for_prompt_toolkit
+  get_fails_header_for_raw_terminal: fails.cli.header.get_fails_header_for_raw_terminal
+  get_fails_header_for_rich: fails.cli.header.get_fails_header_for_rich
+  HSplit: prompt_toolkit.layout.containers.HSplit
+  HTTPError: requests.exceptions.HTTPError
+  interactive_evaluation_selection: fails.cli.evaluation_selector.interactive_evaluation_selection
+  interactive_failure_column_selection: fails.cli.failure_selector.interactive_failure_column_selection
+  itertools: itertools
+  json: json
+  KeyBindings: prompt_toolkit.key_binding.KeyBindings
+  Layout: prompt_toolkit.layout.Layout
+  List: typing.List
+  litellm: litellm
+  LitellmModel: agents.extensions.models.litellm_model.LitellmModel
+  load_dotenv: dotenv.load_dotenv
+  logging: logging
+  Optional: typing.Optional
+  os: os
+  Panel: rich.panel.Panel
+  Path: pathlib.Path
+  PipelineResult: fails.prompts.PipelineResult
+  prepare_trace_data_for_pipeline: fails.utils.prepare_trace_data_for_pipeline
+  query_evaluation_data: fails.weave_query.query_evaluation_data
+  re: re
+  requests: requests
+  Runner: agents.Runner
+  select_config: fails.cli.config_selector.select_config
+  Semaphore: asyncio.Semaphore
+  Set: typing.Set
+  set_tracing_disabled: agents.set_tracing_disabled
+  simple_arrow_selection: fails.cli.column_context_selector.simple_arrow_selection
+  simple_parsing: simple_parsing
+  Style: prompt_toolkit.styles.Style
+  sys: sys
+  Table: rich.table.Table
+  termios: termios
+  TextArea: prompt_toolkit.widgets.TextArea
+  threading: threading
+  time: time
+  Timeout: requests.exceptions.Timeout
+  TraceDepth: fails.weave_query.TraceDepth
+  tty: tty
+  Tuple: typing.Tuple
+  Type: typing.Type
+  Union: typing.Union
+  validate_failure_column: fails.utils.validate_failure_column
+  VSplit: prompt_toolkit.layout.containers.VSplit
+  wandb: wandb
+  weave: weave
+  Window: prompt_toolkit.layout.containers.Window
+  wr: wandb_workspaces.reports.v2
+  wraps: functools.wraps
+  yaml: yaml
+
+functions:
+  _:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [event]
+  __enter__:
+    type: sync
+    module: fails.spinner
+    args: [self]
+  __exit__:
+    type: sync
+    module: fails.spinner
+    args: [self, exc_type, exc_val, exc_tb]
+  __init__:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [self, default_value]
+  __post_init__:
+    type: sync
+    module: fails.weave_query
+    args: [self]
+  _clear_screen:
+    type: sync
+    module: fails.cli.config_selector
+    args: [self]
+  _collect:
+    type: sync
+    module: fails.weave_query
+    args: [item]
+  _collect_refs:
+    type: sync
+    module: fails.weave_query
+    args: [obj]
+    params:
+      returns: List[str]
+  _colorize_frame:
+    type: sync
+    module: fails.spinner
+    args: [self, frame]
+  _display_column_selection:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self]
+    params:
+      returns: bool
+  _display_confirmation:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self]
+    params:
+      returns: bool
+  _display_operator_selection:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self]
+    params:
+      returns: bool
+  _display_value_selection:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self]
+    params:
+      returns: bool
+  _execute_query:
+    type: sync
+    module: fails.weave_query
+    args: [self, query]
+    params:
+      returns: List[Dict]
+  _find_configs:
+    type: sync
+    module: fails.cli.config_selector
+    args: [self]
+    params:
+      returns: List[Tuple]
+  _make_api_request:
+    type: sync
+    module: fails.weave_query
+    args: [self, url, headers, data, timeout, stream]
+    params:
+      returns: requests.Response
+  _make_request:
+    type: sync
+    module: fails.weave_query
+  _setup_headers:
+    type: sync
+    module: fails.weave_query
+    args: [self]
+  _spin:
+    type: sync
+    module: fails.spinner
+    args: [self]
+  aggregate_categorizations:
+    type: async
+    module: fails.pipeline
+    args: [draft_categorization_results_str, num_draft_categorizations, user_context, model, max_concurrent_llm_calls]
+    params:
+      returns: ClusteringCategories
+  build_subtree:
+    type: sync
+    module: fails.weave_query
+    args: [node_id]
+    params:
+      returns: List[Dict]
+  build_trace_hierarchy:
+    type: sync
+    module: fails.weave_query
+    args: [evaluation, all_traces]
+    params:
+      returns: Dict
+  collect_user_context:
+    type: sync
+    module: fails.cli.context_collector
+    args: [default_system, default_eval]
+    params:
+      returns: Optional[Tuple]
+  construct_clustering_prompt:
+    type: sync
+    module: fails.pipeline
+    args: [draft_categorizations_and_notes, num_traces]
+    params:
+      returns: str
+  construct_final_classification_prompt:
+    type: sync
+    module: fails.pipeline
+    args: [row_input, row_output, evaluation_evaluation_or_scorer_data, user_context, available_categories_str]
+    params:
+      returns: str
+  construct_first_pass_categorization_prompt:
+    type: sync
+    module: fails.pipeline
+    args: [row_input, row_output, evaluation_evaluation_or_scorer_data, user_context]
+    params:
+      returns: str
+  create_wandb_report:
+    type: sync
+    module: fails.pipeline
+    args: [entity_name, project_name, title, markdown_report_text, description]
+    params:
+      returns: Optional[str]
+  decorator:
+    type: sync
+    module: fails.spinner
+    args: [func]
+  demo:
+    type: sync
+    module: fails.spinner
+  detect_type:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self, column]
+    params:
+      returns: str
+  display:
+    type: sync
+    module: fails.cli.config_selector
+    args: [self]
+  display_evaluation_summary:
+    type: sync
+    module: fails.utils
+    args: [eval_data, failure_config, console]
+    params:
+      returns: None
+  display_trace_debug_info:
+    type: sync
+    module: fails.utils
+    args: [trace, trace_entry, index, console]
+    params:
+      returns: None
+  draft_categorization:
+    type: async
+    module: fails.pipeline
+    args: [trace_id, row_input, row_output, evaluation_evaluation_or_scorer_data, user_context, model, llm_semaphore, debug]
+    params:
+      returns: FirstPassCategorizationResult
+  extract_column_values:
+    type: sync
+    module: fails.weave_query
+    args: [self, traces, column_path]
+    params:
+      returns: List[Any]
+  extract_components_from_url:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [self, url]
+    params:
+      returns: Optional[tuple]
+  extract_paths:
+    type: sync
+    module: fails.weave_query
+    args: [obj, prefix, depth, max_depth]
+    params:
+      returns: None
+  extract_refs_from_traces:
+    type: sync
+    module: fails.weave_query
+    args: [self, traces, deep]
+    params:
+      returns: Dict
+  extract_safely:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [self, input_str]
+    params:
+      returns: Optional[tuple]
+  filter_dict_by_paths:
+    type: sync
+    module: fails.utils
+    args: [data, allowed_paths]
+    params:
+      returns: Dict
+  filter_evaluation_data_columns:
+    type: sync
+    module: fails.weave_query
+    args: [eval_data, selected_columns]
+    params:
+      returns: Dict
+  filter_nested_dict:
+    type: sync
+    module: fails.utils
+    args: [data, allowed_sub_paths]
+    params:
+      returns: Any
+  filter_trace_data_by_columns:
+    type: sync
+    module: fails.utils
+    args: [traces, selected_columns]
+    params:
+      returns: List[Dict]
+  final_classification:
+    type: async
+    module: fails.pipeline
+    args: [trace_id, row_input, row_output, evaluation_evaluation_or_scorer_data, user_context, available_categories_str,
+      model, llm_semaphore]
+    params:
+      returns: FinalClassificationResult
+  format_sample_values:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self, samples, max_samples, max_total_length]
+    params:
+      returns: str
+  generate_evaluation_report:
+    type: sync
+    module: fails.utils
+    args: [final_classification_results, all_categories, eval_name, wandb_entity, wandb_project]
+    params:
+      returns: str
+  generate_evaluation_report_markdown:
+    type: sync
+    module: fails.utils
+    args: [final_classification_results, all_categories, eval_name, wandb_entity, wandb_project]
+    params:
+      returns: str
+  get_api_key_for_model:
+    type: sync
+    module: fails.pipeline
+    args: [model]
+    params:
+      returns: str
+  get_available_columns:
+    type: sync
+    module: fails.weave_query
+    args: [eval_id, wandb_entity, wandb_project, include_nested_paths, max_nesting_depth]
+    params:
+      returns: Dict
+  get_column_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project, eval_id, console, force_eval_select, debug]
+    params:
+      returns: Tuple
+  get_error_text:
+    type: sync
+    module: fails.cli.evaluation_selector
+  get_fails_header_for_prompt_toolkit:
+    type: sync
+    module: fails.cli.header
+  get_fails_header_for_raw_terminal:
+    type: sync
+    module: fails.cli.header
+  get_fails_header_for_rich:
+    type: sync
+    module: fails.cli.header
+  get_fails_header_lines:
+    type: sync
+    module: fails.cli.header
+  get_recommended_operators:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [self, data_type]
+    params:
+      returns: List[str]
+  get_trace_url:
+    type: sync
+    module: fails.utils
+    args: [trace_id]
+  interactive_column_selection:
+    type: sync
+    module: fails.pipeline
+    args: [console, columns, preselected]
+    params:
+      returns: set[str]
+  interactive_evaluation_selection:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [console, default_value]
+    params:
+      returns: Optional[tuple]
+  interactive_failure_column_selection:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [console, columns, sample_values]
+    params:
+      returns: Tuple
+  load_column_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project]
+    params:
+      returns: Optional[List[str]]
+  load_failure_column_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project]
+    params:
+      returns: Optional[Dict]
+  load_user_context_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project]
+    params:
+      returns: Optional[Tuple]
+  main:
+    type: sync
+    module: fails.cli.evaluation_selector
+  on_text_changed:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [_]
+  prepare_trace_data_for_pipeline:
+    type: sync
+    module: fails.utils
+    args: [eval_data, debug, console, n_samples]
+    params:
+      returns: List[Dict]
+  print_fails_header:
+    type: sync
+    module: fails.cli.header
+  query_by_call_id:
+    type: sync
+    module: fails.weave_query
+    args: [self, call_id, columns, limit]
+    params:
+      returns: List[Dict]
+  query_descendants_recursive:
+    type: sync
+    module: fails.weave_query
+    args: [self, parent_id, columns, limit_per_level, max_depth, current_depth, filter_dict, op_name]
+    params:
+      returns: Dict
+  query_evaluation_children:
+    type: sync
+    module: fails.weave_query
+    args: [self, evaluation_call_id, columns, limit, filter_dict, op_name]
+    params:
+      returns: List[Dict]
+  query_evaluation_data:
+    type: sync
+    module: fails.weave_query
+    args: [eval_id, wandb_entity, wandb_project, columns, include_outputs, trace_depth, include_hierarchy, limit, resolve_refs,
+      replace_refs, deep_ref_extraction, filter_dict]
+    params:
+      returns: Dict
+  query_evaluation_trace_data:
+    type: sync
+    module: fails.weave_query
+    args: [eval_id, wandb_entity, wandb_project, columns, include_outputs, trace_depth, include_hierarchy, limit, filter_dict]
+    params:
+      returns: Dict
+  read_refs_batch:
+    type: sync
+    module: fails.weave_query
+    args: [self, refs]
+    params:
+      returns: List[Any]
+  replace_refs_in_object:
+    type: sync
+    module: fails.weave_query
+    args: [obj, resolved_refs]
+    params:
+      returns: Any
+  replace_refs_in_traces:
+    type: sync
+    module: fails.weave_query
+    args: [self, traces, resolved_refs]
+    params:
+      returns: List[Dict]
+  retry_on_failure:
+    type: sync
+    module: fails.weave_query
+    args: [max_retries, backoff_factor, exceptions, on_retry]
+  run:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [self]
+    params:
+      returns: Optional[tuple]
+  run_draft_categorization:
+    type: async
+    module: fails.pipeline
+    args: [trace_data, user_context, model, max_concurrent_llm_calls, debug]
+    params:
+      returns: list[FirstPassCategorizationResult]
+  run_extract_and_classify_pipeline:
+    type: async
+    module: fails.pipeline
+    args: [eval_id, user_context, debug, model, max_concurrent_llm_calls, config_file_path, wandb_entity, wandb_project, force_eval_select,
+      n_samples]
+    params:
+      returns: PipelineResult
+  run_final_classification:
+    type: async
+    module: fails.pipeline
+    args: [trace_data, user_context, available_categories_str, model, max_concurrent_llm_calls, debug]
+    params:
+      returns: list[FinalClassificationResult]
+  run_pipeline:
+    type: async
+    module: fails.pipeline
+    args: [trace_data, user_context, model, max_concurrent_llm_calls, debug, console]
+    params:
+      returns: PipelineResult
+  save_column_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project, columns, console]
+    params:
+      returns: None
+  save_failure_column_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project, failure_column, failure_value, console]
+    params:
+      returns: None
+  save_report_to_file:
+    type: sync
+    module: fails.pipeline
+    args: [report_text, eval_name, wandb_entity, wandb_project, console]
+    params:
+      returns: Optional[str]
+  save_user_context_preferences:
+    type: sync
+    module: fails.pipeline
+    args: [config_file, wandb_entity, wandb_project, system_context, eval_context, console]
+    params:
+      returns: None
+  select_config:
+    type: sync
+    module: fails.cli.config_selector
+    args: [config_dir]
+    params:
+      returns: Optional[dict]
+  simple_arrow_selection:
+    type: sync
+    module: fails.cli.column_context_selector
+    args: [console, columns, preselected]
+    params:
+      returns: Set[str]
+  slow_function:
+    type: sync
+    module: fails.spinner
+  start:
+    type: sync
+    module: fails.spinner
+    args: [self]
+  stop:
+    type: sync
+    module: fails.spinner
+    args: [self, final_message, success]
+  test_simple_arrow:
+    type: sync
+    module: fails.cli.column_context_selector
+  update_message:
+    type: sync
+    module: fails.spinner
+    args: [self, new_message]
+  validate_failure_column:
+    type: sync
+    module: fails.utils
+    args: [eval_data, failure_config, console]
+    params:
+      returns: None
+  validate_id:
+    type: sync
+    module: fails.cli.evaluation_selector
+    args: [self, eval_id]
+    params:
+      returns: bool
+  with_spinner:
+    type: sync
+    module: fails.spinner
+    args: [message]
+  wrapper:
+    type: sync
+    module: fails.spinner
+  write_line:
+    type: sync
+    module: fails.cli.failure_selector
+    args: [content, clear]
+
+variables:
+  env_var:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+  LLM_MODEL:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+  MAX_CONCURRENT_LLM_CALLS:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+  N_SAMPLES:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+  WANDB_API_KEY:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [fails.weave_query]
+  WANDB_LOGGING_ENTITY:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+  WANDB_LOGGING_PROJECT:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [fails.pipeline]
+
+files:
+  ./:
+    type: pattern
+    actions: [read]
+    params:
+      patterns: ['*.yaml']
+      caller: [_find_configs]
+  ./config/failure_categorization_config.yaml:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  config_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  config_file:
+    type: variable
+    actions: [read]
+    params:
+      caller: [open, yaml.safe_load]
+      alias: [f]
+  config_path:
+    type: literal
+    actions: [read, write]
+    params:
+      caller: [Path('./config/failure_categorization_config.yaml'), open, yaml.safe_load, config_path.parent.mkdir]
+  filepath:
+    type: variable
+    actions: [write]
+    params:
+      caller: [open]
+      alias: [f]
+  reports_dir:
+    type: literal
+    actions: [read, write]
+    params:
+      caller: [Path(reports), reports_dir.mkdir]
