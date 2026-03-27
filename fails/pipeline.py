@@ -34,6 +34,7 @@ from fails.cli.header import get_fails_header_for_rich
 from fails.prompts import (
     CLUSTERING_PROMPT,
     CLUSTERING_SYSTEM_PROMPT,
+    EXECUTION_TRACE_SECTION,
     FINAL_CLASSIFICATION_PROMPT,
     FINAL_CLASSIFICATION_SYSTEM_PROMPT,
     FIRST_PASS_CATEGORIZATION_PROMPT,
@@ -62,7 +63,7 @@ from fails.weave_query import (
 )
 
 load_dotenv()
-set_tracing_disabled(True)
+# Note: set_tracing_disabled will be called conditionally based on debug flag
 
 logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 litellm.turn_off_message_logging = True
@@ -261,6 +262,11 @@ class Args:
     n_samples: int | None = None
     max_concurrent_llm_calls: int = 20  # Control concurrent LLM API calls
     eval_id: str | None = None  # Optional evaluation ID to skip interactive selection
+    # Deep trace analysis args
+    deep_trace_analysis: bool = False  # Enable deep trace analysis for agentic workflows
+    nesting_depth: int = 2  # How deep to traverse (1=children, 2=grandchildren...)
+    max_trace_tokens: int = 10000  # Token threshold before LLM compaction
+    compaction_model: str = "gemini/gemini-2.5-flash-lite"  # Model for trace compaction
 
 
 @weave.op
@@ -939,27 +945,55 @@ def get_column_preferences(
     return failure_config, columns_for_query
 
 
+def format_annotation_section(annotation_summary: Dict[str, Any]) -> str:
+    """Format the human annotations section for the prompt."""
+    if not annotation_summary or not annotation_summary.get("has_annotations"):
+        return ""
+
+    section = "\n## Human Annotations\n\n"
+    section += "The following traces have been annotated by human reviewers. "
+    section += "Use these annotations as valuable signals for identifying patterns:\n\n"
+    section += "<human_annotation_examples>\n"
+
+    for example in annotation_summary.get("examples", []):
+        section += f"\nTrace ID: {example['trace_id']}\n"
+        for key, value in example['annotations'].items():
+            section += f"  {key}: {json.dumps(value, indent=4)}\n"
+
+    section += "</human_annotation_examples>\n"
+    return section
+
+
 def construct_first_pass_categorization_prompt(
-    row_input: dict | str,
-    row_output: dict | str,
-    evaluation_evaluation_or_scorer_data: dict | str,
+    trace_input: dict | str,
+    trace_output: dict | str,
+    trace_metadata: dict | str,
     user_context: str,
+    annotation_section: str = "",
+    execution_trace: str | None = None,
 ) -> str:
     # Convert to JSON strings if needed
-    if isinstance(row_input, dict):
-        row_input = json.dumps(row_input, indent=2)
-    if isinstance(row_output, dict):
-        row_output = json.dumps(row_output, indent=2)
-    if isinstance(evaluation_evaluation_or_scorer_data, dict):
-        evaluation_evaluation_or_scorer_data = json.dumps(
-            evaluation_evaluation_or_scorer_data, indent=2
+    if isinstance(trace_input, dict):
+        trace_input = json.dumps(trace_input, indent=2)
+    if isinstance(trace_output, dict):
+        trace_output = json.dumps(trace_output, indent=2)
+    if isinstance(trace_metadata, dict):
+        trace_metadata = json.dumps(trace_metadata, indent=2)
+
+    # Build execution trace section if provided
+    execution_trace_section = ""
+    if execution_trace:
+        execution_trace_section = EXECUTION_TRACE_SECTION.format(
+            execution_trace=execution_trace
         )
 
     first_pass_categorization_prompt_str = FIRST_PASS_CATEGORIZATION_PROMPT.format(
         user_context=user_context,
-        row_input=row_input,
-        row_output=row_output,
-        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+        trace_input=trace_input,
+        trace_output=trace_output,
+        trace_metadata=trace_metadata,
+        human_annotations_section=annotation_section,
+        execution_trace_section=execution_trace_section,
     )
     return first_pass_categorization_prompt_str
 
@@ -967,13 +1001,15 @@ def construct_first_pass_categorization_prompt(
 @weave.op
 async def draft_categorization(
     trace_id: str,
-    row_input: str | dict,
-    row_output: str | dict,
-    evaluation_evaluation_or_scorer_data: str | dict,
+    trace_input: str | dict,
+    trace_output: str | dict,
+    trace_metadata: str | dict,
     user_context: str,
     model: str,
     llm_semaphore: Semaphore,
+    annotation_section: str = "",
     debug: bool = False,
+    execution_trace: str | None = None,
 ) -> FirstPassCategorizationResult:
     async with llm_semaphore:
         draft_categorization_llm = Agent(
@@ -985,9 +1021,11 @@ async def draft_categorization(
 
         first_pass_categorization_prompt_str = construct_first_pass_categorization_prompt(
             user_context=user_context,
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+            trace_input=trace_input,
+            trace_output=trace_output,
+            trace_metadata=trace_metadata,
+            annotation_section=annotation_section,
+            execution_trace=execution_trace,
         )
 
         draft_categorizations = await Runner.run(
@@ -1008,24 +1046,31 @@ async def draft_categorization(
 async def run_draft_categorization(
     trace_data: dict,
     user_context: str,
+    annotation_summary: Dict[str, Any],
     model: str,
     max_concurrent_llm_calls: int,
     debug: bool = False,
+    deep_trace_analysis: bool = False,
 ) -> list[FirstPassCategorizationResult]:
     # Create shared semaphore for all draft categorization tasks
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
-    
+
+    # Format annotation section once for all traces
+    annotation_section = format_annotation_section(annotation_summary)
+
     # Create tasks with trace_id and shared semaphore
     tasks = [
         draft_categorization(
             trace_id=trace_entry["id"],
-            row_input=trace_entry["inputs"],
-            row_output=trace_entry["output"],
-            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+            trace_input=trace_entry["inputs"],
+            trace_output=trace_entry["output"],
+            trace_metadata=trace_entry["metadata"],
             user_context=user_context,
             model=model,
             debug=debug,
+            annotation_section=annotation_section,
             llm_semaphore=llm_semaphore,
+            execution_trace=trace_entry.get("execution_trace") if deep_trace_analysis else None,
         )
         for trace_entry in trace_data
     ]
@@ -1036,28 +1081,37 @@ async def run_draft_categorization(
 
 
 def construct_final_classification_prompt(
-    row_input: str | dict,
-    row_output: str | dict,
-    evaluation_evaluation_or_scorer_data: str | dict,
+    trace_input: str | dict,
+    trace_output: str | dict,
+    trace_metadata: str | dict,
     user_context: str,
     available_categories_str: str,
+    annotation_section: str = "",
+    execution_trace: str | None = None,
 ) -> str:
     # Convert dictionaries to JSON strings if needed
-    if isinstance(row_input, dict):
-        row_input = json.dumps(row_input, indent=2)
-    if isinstance(row_output, dict):
-        row_output = json.dumps(row_output, indent=2)
-    if isinstance(evaluation_evaluation_or_scorer_data, dict):
-        evaluation_evaluation_or_scorer_data = json.dumps(
-            evaluation_evaluation_or_scorer_data, indent=2
+    if isinstance(trace_input, dict):
+        trace_input = json.dumps(trace_input, indent=2)
+    if isinstance(trace_output, dict):
+        trace_output = json.dumps(trace_output, indent=2)
+    if isinstance(trace_metadata, dict):
+        trace_metadata = json.dumps(trace_metadata, indent=2)
+
+    # Build execution trace section if provided
+    execution_trace_section = ""
+    if execution_trace:
+        execution_trace_section = EXECUTION_TRACE_SECTION.format(
+            execution_trace=execution_trace
         )
 
     final_classification_prompt_str = FINAL_CLASSIFICATION_PROMPT.format(
         user_context=user_context,
-        row_input=row_input,
-        row_output=row_output,
-        evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
-        available_failure_categories=available_categories_str,
+        trace_input=trace_input,
+        trace_output=trace_output,
+        trace_metadata=trace_metadata,
+        available_pattern_categories=available_categories_str,
+        human_annotations_section=annotation_section,
+        execution_trace_section=execution_trace_section,
     )
     return final_classification_prompt_str
 
@@ -1065,13 +1119,16 @@ def construct_final_classification_prompt(
 @weave.op
 async def final_classification(
     trace_id: str,
-    row_input: str,
-    row_output: str,
-    evaluation_evaluation_or_scorer_data: str,
+    trace_input: str,
+    trace_output: str,
+    trace_metadata: str,
     user_context: str,
     available_categories_str: str,
     model: str,
     llm_semaphore: Semaphore,
+    annotation_section: str = "",
+    debug: bool = False,
+    execution_trace: str | None = None,
 ) -> FinalClassificationResult:
     async with llm_semaphore:
         final_classification_llm = Agent(
@@ -1082,11 +1139,13 @@ async def final_classification(
         )
 
         final_classification_prompt_str = construct_final_classification_prompt(
-            row_input=row_input,
-            row_output=row_output,
-            evaluation_evaluation_or_scorer_data=evaluation_evaluation_or_scorer_data,
+            trace_input=trace_input,
+            trace_output=trace_output,
+            trace_metadata=trace_metadata,
             user_context=user_context,
             available_categories_str=available_categories_str,
+            annotation_section=annotation_section,
+            execution_trace=execution_trace,
         )
 
         classification_result = await Runner.run(
@@ -1097,7 +1156,7 @@ async def final_classification(
     final_classification_result = FinalClassificationResult(
         trace_id=trace_id,
         thinking=classification_result.final_output.thinking,
-        failure_category=classification_result.final_output.failure_category,
+        pattern_category=classification_result.final_output.pattern_category,
         categorization_reason=classification_result.final_output.categorization_reason,
     )
 
@@ -1108,24 +1167,32 @@ async def final_classification(
 async def run_final_classification(
     trace_data: list[dict],
     user_context: str,
+    annotation_summary: Dict[str, Any],
     available_categories_str: str,
     model: str,
     max_concurrent_llm_calls: int,
     debug: bool = False,
+    deep_trace_analysis: bool = False,
 ) -> list[FinalClassificationResult]:
     # Create shared semaphore for all final classification tasks
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
-    
+
+    # Format annotation section once for all traces
+    annotation_section = format_annotation_section(annotation_summary)
+
     classification_tasks = [
         final_classification(
             trace_id=trace_entry["id"],
-            row_input=trace_entry["inputs"],
-            row_output=trace_entry["output"],
-            evaluation_evaluation_or_scorer_data=trace_entry["scores"],
+            trace_input=trace_entry["inputs"],
+            trace_output=trace_entry["output"],
+            trace_metadata=trace_entry["metadata"],
             user_context=user_context,
             available_categories_str=available_categories_str,
             model=model,
+            annotation_section=annotation_section,
             llm_semaphore=llm_semaphore,
+            debug=debug,
+            execution_trace=trace_entry.get("execution_trace") if deep_trace_analysis else None,
         )
         for trace_entry in trace_data
     ]
@@ -1153,6 +1220,7 @@ async def aggregate_categorizations(
     user_context: str,
     model: str,
     max_concurrent_llm_calls: int,
+    debug: bool = False,
 ) -> ClusteringCategories:
     llm_semaphore = Semaphore(max_concurrent_llm_calls)
     async with llm_semaphore:  # Control concurrent LLM calls
@@ -1183,23 +1251,36 @@ async def aggregate_categorizations(
 @weave.op
 async def run_pipeline(
     trace_data: list[dict],
+    annotation_summary: Dict[str, Any],
     user_context: str,
     model: str,
     max_concurrent_llm_calls: int,
     debug: bool = False,
     console: Console = Console(),
+    deep_trace_analysis: bool = False,
 ) -> PipelineResult:
     # ----------------- STEP 1: Draft categorization -----------------
     console.print("\n[bold cyan]Step 1: Draft Categorization[/bold cyan]")
     console.print(f"[bright_magenta]  Starting draft categorization for {len(trace_data)} traces...[/bright_magenta]")
 
     if debug:
+        annotation_section = format_annotation_section(annotation_summary)
+
+        # Show annotation status
+        if annotation_section:
+            console.print(f"[green]✓ Including human annotations in prompts[/green]")
+            console.print(f"[dim]  Annotation section length: {len(annotation_section)} chars[/dim]")
+        else:
+            console.print(f"[yellow]No annotations to include in prompts[/yellow]")
+
         first_pass_categorization_prompt_str = (
             construct_first_pass_categorization_prompt(
-                row_input=trace_data[0]["inputs"],
-                row_output=trace_data[0]["output"],
-                evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+                trace_input=trace_data[0]["inputs"],
+                trace_output=trace_data[0]["output"],
+                trace_metadata=trace_data[0]["metadata"],
                 user_context=user_context,
+                annotation_section=annotation_section,
+                execution_trace=trace_data[0].get("execution_trace") if deep_trace_analysis else None,
             )
         )
         console.print(
@@ -1213,22 +1294,24 @@ async def run_pipeline(
         console.print(
             Panel(
                 first_pass_categorization_prompt_str,
-                title="💭 First Pass Categorization Prompt",
+                title="💭 First Pass Categorization Prompt (with annotations if present)",
                 border_style="blue",
                 padding=(1, 2),
             )
         )
 
     # Start spinner for draft categorization
-    draft_spinner = FailsSpinner(f"Categorizing {len(trace_data)} failure traces")
+    draft_spinner = FailsSpinner(f"Categorizing {len(trace_data)} traces")
     draft_spinner.start()
-    
+
     draft_categorization_results = await run_draft_categorization(
         trace_data=trace_data,
         user_context=user_context,
+        annotation_summary=annotation_summary,
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
+        deep_trace_analysis=deep_trace_analysis,
     )
 
     num_draft_categorizations = len(draft_categorization_results)
@@ -1257,15 +1340,15 @@ async def run_pipeline(
         ):
             draft_categorization_results_str += f"#### Candidate Category Name {i + 1}\n\n`{first_pass_category.category_name}`\n\n"
             draft_categorization_results_str += f"#### Category Description {i + 1}:\n\n{first_pass_category.category_description}\n\n"
-            draft_categorization_results_str += f"#### Eval Failure Note {i + 1}\n\n{first_pass_category.eval_failure_note}\n\n"
-            
+            draft_categorization_results_str += f"#### Trace Note {i + 1}\n\n{first_pass_category.trace_note}\n\n"
+
             unique_candidate_categories.add(first_pass_category.category_name)
-            
+
             if debug:
                 result_table.add_row(
                     first_pass_category.category_name,
                     first_pass_category.category_description,
-                    first_pass_category.eval_failure_note,
+                    first_pass_category.trace_note,
                 )
 
         draft_categorization_results_str += "\n" + "=" * 80 + "\n"
@@ -1311,6 +1394,7 @@ async def run_pipeline(
         user_context=user_context,
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
+        debug=debug,
     )
     
     review_spinner.stop("Review completed successfully", success=True)
@@ -1321,41 +1405,43 @@ async def run_pipeline(
         console.print("-" * 80)
         console.print(review_data.category_long_list_thinking)
         console.print("-" * 80)
-        for category in review_data.task_failure_categories:
-            console.print(f"Category: {category.failure_category_name}")
-            console.print(f"Description: {category.failure_category_definition}")
-            console.print(f"Notes: {category.failure_category_notes}")
+        for category in review_data.pattern_categories:
+            console.print(f"Category: {category.pattern_category_name}")
+            console.print(f"Description: {category.pattern_category_definition}")
+            console.print(f"Notes: {category.pattern_category_notes}")
             console.print("-" * 80)
 
     # ----------------- STEP 3: Final classification -----------------
 
     console.print("\n[bold cyan]Step 3: Final Classification[/bold cyan]")
-    console.print("[bright_magenta]  Performing final classification of failures...[/bright_magenta]")
+    console.print("[bright_magenta]  Performing final classification of traces...[/bright_magenta]")
 
     # Add "other" category to the list
-    all_categories = review_data.task_failure_categories + [
+    all_categories = review_data.pattern_categories + [
         Category(
-            thinking="This is the default category for failures that don't fit into any other category",
-            failure_category_name="other",
-            failure_category_definition="Can be used if the evaluation failure sample can't be classified into one of the other classes",
-            failure_category_notes="Default category for unclassifiable failures",
+            thinking="This is the default category for traces that don't fit into any other category",
+            pattern_category_name="other",
+            pattern_category_definition="Can be used if the trace can't be classified into one of the other classes",
+            pattern_category_notes="Default category for unclassifiable traces",
         )
     ]
 
     # Format categories for the prompt
     categories_str = ""
     for i, category in enumerate(all_categories):
-        categories_str += f"\n### Category {i + 1}: {category.failure_category_name}\n"
-        categories_str += f"**Description:** {category.failure_category_definition}\n"
-        categories_str += f"**Notes:** {category.failure_category_notes}\n"
+        categories_str += f"\n### Category {i + 1}: {category.pattern_category_name}\n"
+        categories_str += f"**Description:** {category.pattern_category_definition}\n"
+        categories_str += f"**Notes:** {category.pattern_category_notes}\n"
 
     if debug:
+        annotation_section = format_annotation_section(annotation_summary)
         final_classification_prompt_str = construct_final_classification_prompt(
-            row_input=trace_data[0]["inputs"],
-            row_output=trace_data[0]["output"],
-            evaluation_evaluation_or_scorer_data=trace_data[0]["scores"],
+            trace_input=trace_data[0]["inputs"],
+            trace_output=trace_data[0]["output"],
+            trace_metadata=trace_data[0]["metadata"],
             user_context=user_context,
             available_categories_str=categories_str,
+            annotation_section=annotation_section,
         )
         console.print(
             Panel(
@@ -1375,22 +1461,24 @@ async def run_pipeline(
         )
 
     # Start spinner for final classification
-    classification_spinner = FailsSpinner(f"Classifying {len(trace_data)} failures into categories")
+    classification_spinner = FailsSpinner(f"Classifying {len(trace_data)} traces into categories")
     classification_spinner.start()
-    
+
     classification_results_per_trace = await run_final_classification(
         trace_data=trace_data,
         user_context=user_context,
+        annotation_summary=annotation_summary,
         available_categories_str=categories_str,
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
+        deep_trace_analysis=deep_trace_analysis,
     )
-    
+
     classification_spinner.stop("Classification complete", success=True)
 
     return PipelineResult(
-        failure_categories=all_categories,
+        pattern_categories=all_categories,
         classifications=classification_results_per_trace,
     )
 
@@ -1406,8 +1494,13 @@ async def run_extract_and_classify_pipeline(
     config_file_path: str,
     wandb_entity: str,
     wandb_project: str,
+    nesting_depth: int,
+    max_trace_tokens: int,
+    compaction_model: str,    
     force_eval_select: bool = False,
     n_samples: int | None = None,
+    trace_filters: Dict[str, Any] | None = None,
+    deep_trace_analysis: bool = False,
 ) -> PipelineResult:
     # Query Weave for evaluation data using the enhanced API
     console = Console()
@@ -1433,56 +1526,94 @@ async def run_extract_and_classify_pipeline(
     
     # ----------------- Column Selection -----------------
 
-    # Check for saved column preferences
-    failure_config, columns_for_query = get_column_preferences(
-        config_file=config_file_path,
-        wandb_entity=wandb_entity,
-        wandb_project=wandb_project,
-        eval_id=eval_id,
-        debug=debug,
-        force_eval_select=force_eval_select,
-        console=console,
-    )
+    # For trace filters, we skip column/failure selection since filters are already defined
+    if trace_filters:
+        # When using trace filters, we don't need failure_config (filters define what to query)
+        # and we query all available columns
+        failure_config = None
+        columns_for_query = None
+    else:
+        # Check for saved column preferences (only for evaluation URLs)
+        failure_config, columns_for_query = get_column_preferences(
+            config_file=config_file_path,
+            wandb_entity=wandb_entity,
+            wandb_project=wandb_project,
+            eval_id=eval_id,
+            debug=debug,
+            force_eval_select=force_eval_select,
+            console=console,
+        )
 
     # Start spinner for data fetching
-    data_spinner = FailsSpinner("Querying evaluation data")
+    if trace_filters:
+        data_spinner = FailsSpinner("Querying trace data with filters")
+    else:
+        data_spinner = FailsSpinner("Querying evaluation data")
     data_spinner.start()
-    
-    eval_data = query_evaluation_data(
-        eval_id=eval_id,
-        wandb_entity=wandb_entity,
-        wandb_project=wandb_project,
-        columns=columns_for_query,  # Use the selected columns + display_name
-        include_outputs=True,
-        deep_ref_extraction=False,
-        trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
-        include_hierarchy=True,
-        limit=n_samples,
-        filter_dict={failure_config["failure_column"]: failure_config["failure_filter"]}
-        if failure_config
-        else None,
-    )
-    
-    data_spinner.stop("Evaluation data retrieved", success=True)
+
+    # Query data based on whether we have trace_filters or eval_id
+    if trace_filters:
+        # Import the new function
+        from fails.weave_query import query_trace_data_with_filters
+
+        eval_data = query_trace_data_with_filters(
+            weave_filters=trace_filters,
+            wandb_entity=wandb_entity,
+            wandb_project=wandb_project,
+            columns=columns_for_query,
+            include_outputs=True,
+            deep_ref_extraction=False,
+            limit=n_samples,
+        )
+        data_spinner.stop("Trace data retrieved", success=True)
+    else:
+        # Use existing evaluation query
+        eval_data = query_evaluation_data(
+            eval_id=eval_id,
+            wandb_entity=wandb_entity,
+            wandb_project=wandb_project,
+            columns=columns_for_query,  # Use the selected columns + display_name
+            include_outputs=True,
+            deep_ref_extraction=False,
+            trace_depth=TraceDepth.DIRECT_CHILDREN,  # Get evaluation + direct children
+            include_hierarchy=True,
+            limit=n_samples,
+            filter_dict={failure_config["failure_column"]: failure_config["failure_filter"]}
+            if failure_config
+            else None,
+        )
+        data_spinner.stop("Evaluation data retrieved", success=True)
 
     # ----------------- Data Processing -----------------
-    # Filter the evaluation data to only include selected columns
-    if debug:
-        console.print(
-            "[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
-        )
-    eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
+    # Filter the evaluation data to only include selected columns (only for evaluation URLs)
+    if columns_for_query:
+        if debug:
+            console.print(
+                "[bold cyan]🔍 Filtering evaluation data to only include selected columns...[/bold cyan]"
+            )
+        eval_data = filter_evaluation_data_columns(eval_data, columns_for_query)
 
     # Display evaluation summary
     display_evaluation_summary(eval_data, failure_config, console)
 
-    # Validate failure column if one was selected
+    # Validate failure column if one was selected (only for evaluation URLs)
     if failure_config:
         validate_failure_column(eval_data, failure_config, console)
 
     # Prepare trace data for pipeline
-    trace_data = prepare_trace_data_for_pipeline(
-        eval_data, debug, console, n_samples=n_samples
+    trace_data, annotation_summary = prepare_trace_data_for_pipeline(
+        eval_data, 
+        debug, 
+        console, 
+        n_samples=n_samples, 
+        selected_columns=columns_for_query,
+        # Deep trace analysis params
+        deep_trace_analysis=deep_trace_analysis,
+        nesting_depth=nesting_depth,
+        max_trace_tokens=max_trace_tokens,
+        compaction_model=compaction_model,
+        wandb_entity=wandb_entity,
+        wandb_project=wandb_project,
     )
 
     console.print("")  # Add spacing before pipeline execution
@@ -1490,14 +1621,16 @@ async def run_extract_and_classify_pipeline(
     # ----------------- Pipeline Execution -----------------
     pipeline_result = await run_pipeline(
         trace_data=trace_data,
+        annotation_summary=annotation_summary,
         user_context=user_context,
         model=model,
         max_concurrent_llm_calls=max_concurrent_llm_calls,
         debug=debug,
         console=console,
+        deep_trace_analysis=deep_trace_analysis,
     )
     final_classification_results = pipeline_result.classifications
-    all_categories = pipeline_result.failure_categories
+    all_categories = pipeline_result.pattern_categories
 
     # ----------------- Generate Evaluation Report -----------------
 
@@ -1505,19 +1638,26 @@ async def run_extract_and_classify_pipeline(
     console.print("[bright_magenta]  Generating evaluation report...[/bright_magenta]")
 
     # Generate Rich-formatted report for console display
+    # Get eval name - handle both evaluation and trace-only queries
+    if "evaluation" in eval_data:
+        eval_name = eval_data["evaluation"].get("display_name", eval_id)
+    else:
+        # For trace queries, use a descriptive name
+        eval_name = f"Trace Analysis - {wandb_project}"
+
     report_rich = generate_evaluation_report(
         final_classification_results=final_classification_results,
         all_categories=all_categories,
-        eval_name=eval_data["evaluation"].get("display_name", eval_id),
+        eval_name=eval_name,
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
     )
-    
+
     # Generate Markdown report for file saving
     report_markdown = generate_evaluation_report_markdown(
         final_classification_results=final_classification_results,
         all_categories=all_categories,
-        eval_name=eval_data["evaluation"].get("display_name", eval_id),
+        eval_name=eval_name,
         wandb_entity=wandb_entity,
         wandb_project=wandb_project,
     )
@@ -1531,8 +1671,7 @@ async def run_extract_and_classify_pipeline(
         padding=(1, 2),
     ))
 
-    # Save markdown report to local file
-    eval_name = eval_data["evaluation"].get("display_name", eval_id)
+    # Save markdown report to local file (eval_name already set above)
     local_filepath = save_report_to_file(
         report_text=report_markdown,
         eval_name=eval_name,
@@ -1679,23 +1818,26 @@ if __name__ == "__main__":
             console.print("[yellow]Configuration selection cancelled. Exiting.[/yellow]")
             sys.exit(0)
     
+    # Store trace filters if using trace URL
+    trace_filters = None
+
     if not eval_id:
         # Interactive selection if --force_eval_select is used or forced from config selector
         if args.force_eval_select:
             try:
                 result = interactive_evaluation_selection(console)
                 if not result:
-                    console.print("[red]No evaluation selected. Exiting.[/red]")
+                    console.print("[red]No evaluation/trace selected. Exiting.[/red]")
                     sys.exit(1)
-                # Extract components from result
-                entity, project, eval_id = result
+                # Extract components from result (now includes filters)
+                entity, project, eval_id, trace_filters = result
                 if entity and project:
                     wandb_entity_extracted = entity
                     wandb_project_extracted = project
 
             except Exception as e:
-                console.print(f"[red]Error during evaluation selection: {str(e)}[/red]")
-                console.print("[yellow]Please try again with a valid evaluation URL.[/yellow]")
+                console.print(f"[red]Error during evaluation/trace selection: {str(e)}[/red]")
+                console.print("[yellow]Please try again with a valid evaluation or trace URL.[/yellow]")
                 sys.exit(1)
     
     # Override settings from test config if available
@@ -1760,17 +1902,29 @@ if __name__ == "__main__":
     args.config_file = config_file
 
     if args.debug:
-        litellm._turn_on_debug()
+        # Note: litellm debug output disabled to reduce noise
+        # litellm._turn_on_debug()
+        # Enable Weave tracing in debug mode to log all LLM calls
+        set_tracing_disabled(False)
+        console.print("[dim]Debug mode: Weave tracing enabled for LLM calls[/dim]")
+    else:
+        # Disable agents library tracing in normal mode to reduce noise
+        set_tracing_disabled(True)
 
     # Initialize Weave with optional entity
-    # If wandb_logging_entity is provided (via CLI or .env), use entity/project format
-    # Otherwise, just use the project name
+    # Priority: 1) CLI --wandb-logging-entity, 2) extracted entity from URL, 3) just project name
     if args.wandb_logging_entity:
         weave_project = f"{args.wandb_logging_entity}/{args.wandb_logging_project}"
+    elif wandb_entity_extracted:
+        # Use extracted entity from trace/evaluation URL for weave logging
+        weave_project = f"{wandb_entity_extracted}/{args.wandb_logging_project}"
     else:
         weave_project = args.wandb_logging_project
-    
+
     weave.init(weave_project)
+
+    if args.debug:
+        console.print(f"[dim]Weave logging to: {weave_project}[/dim]")
 
     asyncio.run(
         run_extract_and_classify_pipeline(
@@ -1784,5 +1938,11 @@ if __name__ == "__main__":
             wandb_entity=final_wandb_entity,
             wandb_project=final_wandb_project,
             n_samples=args.n_samples,
+            trace_filters=trace_filters,
+            # Deep trace analysis args
+            deep_trace_analysis=args.deep_trace_analysis,
+            nesting_depth=args.nesting_depth,
+            max_trace_tokens=args.max_trace_tokens,
+            compaction_model=args.compaction_model,
         )
     )
